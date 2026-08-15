@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+
+# Audio files (large)
+rj0/
+*.mp3
+*.wav
+*.flac
+
+# Output
+*.funscript
+output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

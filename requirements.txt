@@ -1,0 +1,12 @@
+qwen-asr[vllm]>=0.0.1
+torch>=2.0.0
+torchaudio>=2.0.0
+# ModelScope for model downloads (preferred over HF for China)
+modelscope>=1.15.0
+# HuggingFace Hub as fallback download source
+huggingface-hub>=0.20.0
+# Text-to-image generation
+diffusers>=0.28.0
+transformers>=4.40.0
+accelerate>=0.28.0
+safetensors>=0.4.0
