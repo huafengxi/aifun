@@ -15,6 +15,9 @@ rj0/
 *.funscript
 output/
 
+# Runtime state
+demosaic_state.json
+
 # IDE
 .idea/
 .vscode/

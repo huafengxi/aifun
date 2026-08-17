@@ -10,6 +10,52 @@ AI tools for fun — Japanese ASMR voice analysis, funscript generation, and AI 
 | [paint.py](paint.md) | Generate images from text prompts using Stable Diffusion / SDXL / Flux |
 | [funscript.py](#funscriptpy) | Convert siko timestamps into funscript format for interactive toys |
 | [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
+| [qwen3_serve.py](#qwen3_servepy) | Serve a Qwen3 LLM with vLLM (OpenAI API) in Docker |
+| [qwen3_bench.py](#qwen3_benchpy) | Single-stream decode perf test for the qwen3 server |
+
+### qwen3_serve.py
+
+Serves a Qwen3 LLM as an OpenAI-compatible API using vLLM in Docker.
+Models are downloaded from ModelScope (preferred) into `~/m/models` first.
+
+```bash
+make -C ~/m qwen3.start      # download (if needed) + start vLLM on :8000
+make -C ~/m qwen3.status     # container + API health
+make -C ~/m qwen3.stop       # stop/remove the container
+make -C ~/m qwen3.logs       # tail container logs
+
+# override the model (default: Qwen/Qwen3.8-27B-FP8)
+make -C ~/m qwen3.start QWEN3_MODEL=Qwen/Qwen3.8-27B-FP8
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QWEN3_MODEL` | `Qwen/Qwen3.8-27B-FP8` | Model ID on ModelScope |
+| `QWEN3_PORT` | `8000` | Host port for the OpenAI API |
+| `QWEN3_MODELS_DIR` | `/data/yuanqi.xhf/models` | Local model directory |
+| `QWEN3_IMAGE` | `mass-runner:cuda13.0-vllm0.22.1` | vLLM image (must support Qwen3.5 arch) |
+| `QWEN3_TP` | `2` | Tensor-parallel size (27B uses both GPUs) |
+| `QWEN3_MAX_MODEL_LEN` | `32768` | Max context length |
+| `QWEN3_SPECULATIVE` | `{"method":"qwen3_5_mtp","num_speculative_tokens":1}` | MTP speculative decoding (speeds up single-stream decode; set empty to disable) |
+| `QWEN3_TOOL_CALL_PARSER` | `qwen3_xml` | Tool call parser (enables `tool_choice: auto` / native function calling; set empty to disable) |
+| `QWEN3_REASONING_PARSER` | `qwen3` | Reasoning parser (splits ` thinking`/` response` into `reasoning_content` vs `content`; set empty to disable) |
+
+### qwen3_bench.py
+
+Single-stream (one request at a time) decode performance test for the server
+started by `qwen3_serve.py`. Reports throughput (tok/s) and, by default,
+time-to-first-token (TTFT) via streaming.
+
+```bash
+make -C ~/m qwen3.bench                              # default: 512 tokens, 3 runs
+make -C ~/m qwen3.bench ARGS="--max-tokens 1024 --runs 5"
+./qwen3_bench.py --no-stream                         # throughput only
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QWEN3_BENCH_URL` | `http://127.0.0.1:8000` | OpenAI base URL |
+| `QWEN3_BENCH_MODEL` | `qwen3` | Model name |
 
 ### funscript.py
 
