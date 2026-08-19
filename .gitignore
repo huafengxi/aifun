@@ -23,3 +23,7 @@ demosaic_state.json
 .vscode/
 *.swp
 *.swo
+# Generated images
+*.png
+*.jpg
+*.jpeg
