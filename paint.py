@@ -98,7 +98,38 @@ def _extract_json(text: str) -> dict:
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"no JSON object found in LLM output: {text[:120]!r}")
-    return json.loads(text[start:end + 1])
+    return json.loads(_sanitize_json_text(text[start:end + 1]))
+
+
+def _sanitize_json_text(text: str) -> str:
+    """Escape raw control characters (newlines/tabs) inside JSON string literals."""
+    out = []
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+                out.append(ch)
+            elif ch == "\\":
+                esc = True
+                out.append(ch)
+            elif ch == '"':
+                in_str = False
+                out.append(ch)
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ch == "\r":
+                out.append("\\r")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+    return "".join(out)
 
 
 def _fallback_wrap(prompt: str) -> str:
@@ -136,34 +167,47 @@ def to_json_prompt(prompt: str, width: int, height: int) -> str:
     user = user + "\n" + EXPANSION_POLICY
 
     print(f"Expanding prompt to JSON via {QWEN3_MODEL}...", file=sys.stderr)
-    try:
-        result = _http_post_json(
-            f"{QWEN3_API}/v1/chat/completions",
-            {
-                "model": QWEN3_MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 16384,
-                # Disable thinking: reasoning can exhaust max_tokens before the
-                # caption is emitted (content=None, finish_reason=length).
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            timeout=180,
-        )
-        content = result["choices"][0]["message"]["content"]
-        if not content:
-            raise ValueError(f"empty content (finish_reason={result['choices'][0].get('finish_reason')})")
-        caption = _extract_json(content)
-        expanded = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
-        print(f"JSON caption ready ({len(expanded)} chars):", file=sys.stderr)
-        print(json.dumps(caption, ensure_ascii=False, indent=2), file=sys.stderr)
-        return expanded
-    except Exception as e:
-        print(f"magic-prompt expansion failed ({e}), using fallback wrapper", file=sys.stderr)
-        return _fallback_wrap(prompt)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    content = ""
+    for attempt in range(2):
+        try:
+            result = _http_post_json(
+                f"{QWEN3_API}/v1/chat/completions",
+                {
+                    "model": QWEN3_MODEL,
+                    "messages": messages,
+                    "temperature": 0.7 if attempt == 0 else 0.2,
+                    "max_tokens": 16384,
+                    # Disable thinking: reasoning can exhaust max_tokens before the
+                    # caption is emitted (content=None, finish_reason=length).
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+                timeout=180,
+            )
+            content = result["choices"][0]["message"]["content"]
+            if not content:
+                raise ValueError(f"empty content (finish_reason={result['choices'][0].get('finish_reason')})")
+            caption = _extract_json(content)
+            expanded = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
+            print(f"JSON caption ready ({len(expanded)} chars):", file=sys.stderr)
+            print(json.dumps(caption, ensure_ascii=False, indent=2), file=sys.stderr)
+            return expanded
+        except Exception as e:
+            if attempt == 0:
+                print(f"caption JSON invalid ({e}); asking {QWEN3_MODEL} to repair...", file=sys.stderr)
+                messages = [
+                    {"role": "system", "content": "You output exactly one valid minified JSON object. No commentary, no markdown fences."},
+                    {"role": "user", "content": (
+                        f"The following JSON is invalid ({e}). Fix it and output ONLY the "
+                        f"corrected minified JSON, keeping all content unchanged:\n\n{content}"
+                    )},
+                ]
+            else:
+                print(f"magic-prompt expansion failed ({e}), using fallback wrapper", file=sys.stderr)
+                return _fallback_wrap(prompt)
 
 
 def generate(
