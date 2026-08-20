@@ -1,6 +1,10 @@
 #!/home/yuanqi.xhf/miniconda3/bin/python
 """
-dav_sync.py — Sync files between local mirror and WebDAV remote.
+dav_sync.py — Sync files between local mirror and remote storage.
+
+Backends (DAV_BACKEND env, default webdav):
+    webdav  — alist WebDAV mount (legacy)
+    pikpak  — direct PikPak API via ../cloud-storage/pikpak.py
 
 Usage:
     ./dav_sync.py download <remote_dir> <local_mirror>
@@ -178,18 +182,129 @@ def _move_webdav(dav, src_path, dst_path):
 
 
 # ---------------------------------------------------------------------------
+# Backends — uniform interface: list / download / upload / move.
+# list() returns None when the remote is unreachable/unknown (callers must
+# NOT treat that as an empty dir).
+# ---------------------------------------------------------------------------
+
+class WebDAVBackend:
+    name = "webdav"
+
+    def __init__(self):
+        self.dav = _get_webdav_client()
+
+    def list(self, path):
+        return _list_webdav_dir(self.dav, path)
+
+    def download(self, remote_path, local_path):
+        return _download_from_webdav(self.dav, remote_path, local_path)
+
+    def upload(self, local_path, remote_path):
+        return _upload_to_webdav(self.dav, local_path, remote_path)
+
+    def move(self, src_path, dst_path):
+        return _move_webdav(self.dav, src_path, dst_path)
+
+
+class PikPakBackend:
+    """Direct PikPak API backend (cloud-storage/pikpak.py)."""
+    name = "pikpak"
+
+    def __init__(self):
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "cloud-storage"))
+        import pikpak
+        self.pk = pikpak
+
+    @staticmethod
+    def _p(path):
+        return "/" + path.strip("/") if path.strip("/") else "/"
+
+    def list(self, path):
+        p = self._p(path)
+        try:
+            parent = "" if p == "/" else self.pk._get_folder_id(p)
+            names = []
+            page_token = None
+            while True:
+                result = self.pk.list_files(parent_id=parent,
+                                            page_token=page_token)
+                names.extend(f["name"] for f in result["files"]
+                             if f["kind"] != "drive#folder")
+                page_token = result.get("next_page_token")
+                if not page_token:
+                    break
+            return names
+        except Exception as e:
+            print(f"Error listing {p}: {e}", file=sys.stderr)
+            return None
+
+    def download(self, remote_path, local_path):
+        """Download via .part temp file (watchers never see partials)."""
+        part_path = local_path + ".part"
+        try:
+            os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+            self.pk.download_file(self._p(remote_path), part_path)
+            os.replace(part_path, local_path)
+            return True
+        except Exception as e:
+            print(f"Download error {remote_path}: {e}", file=sys.stderr)
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            return False
+
+    def upload(self, local_path, remote_path):
+        try:
+            self.pk.upload_file(local_path, self._p(remote_path))
+            return True
+        except Exception as e:
+            print(f"Upload error {remote_path}: {e}", file=sys.stderr)
+            return False
+
+    def move(self, src_path, dst_path):
+        try:
+            src = self._p(src_path)
+            dst = self._p(dst_path)
+            src_parent = self.pk._get_folder_id(os.path.dirname(src))
+            f = self.pk._find_child(src_parent, os.path.basename(src))
+            if not f:
+                print(f"Move error: {src_path} not found", file=sys.stderr)
+                return False
+            dst_parent = self.pk._get_folder_id(os.path.dirname(dst),
+                                                create=True)
+            self.pk._api_request(
+                "POST", "/drive/v1/files:batchMove",
+                json={"ids": [f["id"]], "to": {"parent_id": dst_parent}})
+            return True
+        except Exception as e:
+            print(f"Move error {src_path} -> {dst_path}: {e}",
+                  file=sys.stderr)
+            return False
+
+
+def _get_backend():
+    name = os.environ.get("DAV_BACKEND", "webdav").lower()
+    if name == "pikpak":
+        return PikPakBackend()
+    return WebDAVBackend()
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
 def cmd_download(args):
     """Download all files from remote_dir to local_mirror."""
-    dav = _get_webdav_client()
+    backend = _get_backend()
     remote_dir = args.remote_dir.strip("/")
     local_mirror = args.local_mirror
 
     os.makedirs(local_mirror, exist_ok=True)
 
-    remote_files = _list_webdav_dir(dav, remote_dir)
+    remote_files = backend.list(remote_dir)
     if remote_files is None:
         print(f"SKIP download: remote /{remote_dir} unreachable", file=sys.stderr)
         return
@@ -225,7 +340,7 @@ def cmd_download(args):
 
         remote_path = f"{remote_dir}/{fname}"
         print(f"  Download: {fname} -> {local_name}", file=sys.stderr)
-        if _download_from_webdav(dav, remote_path, local_path):
+        if backend.download(remote_path, local_path):
             print(f"    OK", file=sys.stderr)
         else:
             print(f"    FAILED", file=sys.stderr)
@@ -235,11 +350,11 @@ def cmd_download(args):
 
 def cmd_upload(args):
     """Upload .restored.mp4 files from local_mirror to remote_dir."""
-    dav = _get_webdav_client()
+    backend = _get_backend()
     local_mirror = args.local_mirror
     remote_dir = args.remote_dir.strip("/")
 
-    remote_files = _list_webdav_dir(dav, remote_dir)
+    remote_files = backend.list(remote_dir)
     if remote_files is None:
         print(f"SKIP upload: remote /{remote_dir} unreachable", file=sys.stderr)
         return
@@ -260,7 +375,7 @@ def cmd_upload(args):
         local_path = os.path.join(local_mirror, entry)
         remote_path = f"{remote_dir}/{remote_name}"
         print(f"  Upload: {entry} -> {remote_name}", file=sys.stderr)
-        if _upload_to_webdav(dav, local_path, remote_path):
+        if backend.upload(local_path, remote_path):
             print(f"    OK", file=sys.stderr)
         else:
             print(f"    FAILED", file=sys.stderr)
@@ -270,11 +385,11 @@ def cmd_upload(args):
 
 def cmd_demosaic_clean_remote(args):
     """Move <foo>.mp4 to <remote_done_dir> if <foo>.restored.mp4 exists."""
-    dav = _get_webdav_client()
+    backend = _get_backend()
     remote_dir = args.remote_dir.strip("/")
     remote_done_dir = args.remote_done_dir.strip("/")
 
-    remote_files = _list_webdav_dir(dav, remote_dir)
+    remote_files = backend.list(remote_dir)
     if remote_files is None:
         print(f"SKIP clean remote: remote /{remote_dir} unreachable", file=sys.stderr)
         return
@@ -291,7 +406,7 @@ def cmd_demosaic_clean_remote(args):
             src = f"{remote_dir}/{mp4}"
             dst = f"{remote_done_dir}/{mp4}"
             print(f"  Move: {mp4} -> done/", file=sys.stderr)
-            if _move_webdav(dav, src, dst):
+            if backend.move(src, dst):
                 print(f"    OK", file=sys.stderr)
             else:
                 print(f"    FAILED", file=sys.stderr)
@@ -305,11 +420,11 @@ def cmd_clean_local(args):
     - Delete <foo>.mp4 if <remote_dir> has no such file (original was moved).
     - Delete <foo>.restored.mp4 if <remote_dir> has such file (restored was uploaded).
     """
-    dav = _get_webdav_client()
+    backend = _get_backend()
     local_dir = args.local_dir
     remote_dir = args.remote_dir.strip("/")
 
-    remote_files = _list_webdav_dir(dav, remote_dir)
+    remote_files = backend.list(remote_dir)
     if remote_files is None:
         print(f"SKIP clean local: remote /{remote_dir} unreachable", file=sys.stderr)
         return

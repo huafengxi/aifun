@@ -12,6 +12,7 @@ AI tools for fun — Japanese ASMR voice analysis, funscript generation, and AI 
 | [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
 | [qwen3_serve.py](#qwen3_servepy) | Serve a Qwen3 LLM with vLLM (OpenAI API) in Docker |
 | [qwen3_bench.py](#qwen3_benchpy) | Single-stream decode perf test for the qwen3 server |
+| [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 
 ### qwen3_serve.py
 
@@ -56,6 +57,30 @@ make -C ~/m qwen3.bench ARGS="--max-tokens 1024 --runs 5"
 |----------|---------|-------------|
 | `QWEN3_BENCH_URL` | `http://127.0.0.1:8000` | OpenAI base URL |
 | `QWEN3_BENCH_MODEL` | `qwen3` | Model name |
+
+### video-enhance.py
+
+Optimizes video quality with an ffmpeg filter pipeline — denoise (`hqdn3d`) →
+sharpen (`cas`) → optional lanczos upscale — and re-encodes to **H.265**.
+Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
+
+```bash
+./video-enhance.py input.mp4                          # -> input.enhanced.mp4 (H.265)
+./video-enhance.py input.mp4 --scale 2 --cq 20        # 2x upscale, higher quality
+./video-enhance.py input.mp4 --encoder cpu --dry-run  # preview command, CPU encoder
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o` | `<input>.enhanced.mp4` | Output file |
+| `--scale` | `1.0` | Upscale factor (e.g. `2` for 2x, lanczos) |
+| `--denoise` | `0.3` | Denoise strength 0.0–1.0 (0 = off) |
+| `--sharpen` | `0.4` | Sharpen amount 0.0–1.0 (0 = off) |
+| `--cq` | `22` | Quality target (NVENC `-cq` / x265 `-crf`), lower = better |
+| `--encoder` | `auto` | `auto` / `gpu` (hevc_nvenc) / `cpu` (libx265) |
+| `--force` | off | Overwrite existing output |
+
+Audio is copied unchanged; output gets `hvc1` tag + faststart for compatibility.
 
 ### funscript.py
 
