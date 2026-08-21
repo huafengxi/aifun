@@ -82,6 +82,14 @@ KREA2_PRESETS = {
 # Local model resolution (ModelScope preferred, HuggingFace fallback)
 # ---------------------------------------------------------------------------
 
+# maas-managed weights (~/m/models, see maas/krea2/) — checked before any
+# download cache; the cache paths below remain as fallback.
+MAAS_MODEL_DIRS = {
+    "krea/Krea-2-Turbo": "~/m/models/krea2-turbo",
+    "sakamakismile/Krea-2-Turbo-FP8": "~/m/models/krea2-turbo-fp8",
+}
+
+
 def _check_local_cache(model_id: str, cache_dir: str = None) -> str | None:
     """Check if a diffusers model exists in a local cache (ModelScope or HF)."""
     safe_id = model_id.replace("/", "--")
@@ -103,6 +111,13 @@ def _check_local_cache(model_id: str, cache_dir: str = None) -> str | None:
                     if os.path.isfile(os.path.join(snap_path, marker)):
                         return snap_path
         return None
+
+    # maas-managed model dirs take priority over every download cache.
+    maas_dir = MAAS_MODEL_DIRS.get(model_id)
+    if maas_dir:
+        found = _find_snapshot(os.path.expanduser(maas_dir))
+        if found:
+            return found
 
     # ModelScope caches first (preferred, more reliable in China)
     ms_bases = []
