@@ -31,6 +31,28 @@ echo "a cat" | ./expand.py | ./paint.py -o cat.png
 ./paint.py "a cat" --width 1024 --height 1024 --seed 42 -o cat.png
 ```
 
+### Resident server mode (skip the ~17 s load per call)
+
+One-shot runs spend ~17 s loading the pipeline and ~13.5 s generating. For
+repeated generation, keep the pipeline resident:
+
+```bash
+./paint.py serve --port 8097            # load once, serve until Ctrl-C
+./paint.py serve --idle-exit 1800       # auto-exit after 30 min idle
+
+# thin client (same options as one-shot; also $PAINT_SERVER)
+./paint.py --server http://127.0.0.1:8097 "a cat" -o cat.png
+echo "a cat" | ./expand.py | ./paint.py --server http://127.0.0.1:8097 -o cat.png
+
+# raw HTTP: POST /generate (JSON) → PNG bytes; GET /health
+curl -s -X POST http://127.0.0.1:8097/generate \
+  -d '{"prompt": "a cat", "width": 1024, "height": 1024, "seed": 42}' -o cat.png
+```
+
+Same single file, stdlib HTTP only, no new dependencies; requests are
+serialized; outputs are bit-identical to one-shot mode for the same seed.
+Default behavior (no `serve`, no `--server`) is unchanged.
+
 ## Local models (Krea 2)
 
 | Alias | Model | Notes |
@@ -122,8 +144,12 @@ HF-only, no ModelScope mirror). Caches checked: `$MODELSCOPE_CACHE`,
 | `--steps` | 8 (krea2) | Inference steps |
 | `--cfg` | 0.0 (krea2) | Guidance scale (distilled Turbo runs without CFG) |
 | `--seed` | random | Random seed |
+| `--server` | off | Use a running `paint.py serve` (thin client); also `$PAINT_SERVER` |
 | `-n`, `--num-images` | `1` | Number of images |
 | `--dual-gpu` | off | Experimental component split across two GPUs |
+
+`serve` subcommand: `--host` (127.0.0.1), `--port` (8097),
+`--idle-exit SEC` (0 = never), `--dual-gpu`.
 
 ## Environment
 
