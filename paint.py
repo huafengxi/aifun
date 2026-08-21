@@ -1,17 +1,32 @@
 #!/home/yuanqi.xhf/miniconda3/bin/python
 """
-paint.py — Text-to-image generation via the ideogram4 MaaS service.
+paint.py — Text-to-image generation.
 
-Plain-text prompts are automatically expanded into Ideogram 4's structured
-JSON caption format using qwen3-a ("magic prompt", driven by Ideogram's
-official open-source magic-prompt system prompt). Prompts that are already
-valid JSON are passed through unchanged.
+Two backends:
+
+1. ideogram4 MaaS (default): plain-text prompts are automatically expanded
+   into Ideogram 4's structured JSON caption format using qwen3-a ("magic
+   prompt", driven by Ideogram's official open-source magic-prompt system
+   prompt). Prompts that are already valid JSON are passed through unchanged.
+
+2. Local diffusers pipelines (Krea 2): select with a model alias as the first
+   positional arg (or --model). Weights are downloaded from ModelScope
+   (preferred) or HuggingFace on first use.
 
 Usage:
     ./paint.py "a cat sitting on a cloud" -o cat.png
     echo "cyberpunk city at night" | ./paint.py -o city.png
     ./paint.py - --width 1536 --height 864 < prompt.txt
     ./paint.py --no-magic '{"high_level_description": "...", ...}'
+    ./paint.py krea2 "a fox walking in the snow" -o fox.png
+    ./paint.py krea2_raw "a fox" --steps 52 --cfg 3.5 -o fox.png
+
+Model aliases (local pipelines):
+    krea2       Krea 2 Turbo FP8 (sakamakismile/Krea-2-Turbo-FP8) — W8A8
+                quantized transformer (~12.8 GB vs ~25 GB bf16), requires
+                `pip install nvidia-modelopt`
+    krea2_bf16  Krea 2 Turbo bf16 (krea/Krea-2-Turbo) — original weights
+    krea2_raw   Krea 2 Raw bf16   (krea/Krea-2-Raw)   — base model, full sampler
 
 Environment:
     IDEOGRAM_API   ideogram4 service URL   (default: http://localhost:9114)
@@ -21,11 +36,14 @@ Environment:
 
 import argparse
 import base64
+import glob
+import inspect
 import io
 import json
 import math
 import os
 import sys
+import time
 import urllib.request
 
 IDEOGRAM_API = os.environ.get("IDEOGRAM_API", "http://localhost:9114")
@@ -34,6 +52,28 @@ QWEN3_MODEL = os.environ.get("QWEN3_MODEL", "qwen3.8-a")
 MAGIC_PROMPT_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "ideogram4_magic_prompt_v1.txt"
 )
+
+# Model aliases — first positional arg can be an alias to select a local
+# diffusers model instead of the ideogram4 MaaS backend.
+MODEL_ALIASES = {
+    "krea2": "sakamakismile/Krea-2-Turbo-FP8",
+    "krea2_bf16": "krea/Krea-2-Turbo",
+    "krea2_raw": "krea/Krea-2-Raw",
+}
+
+# FP8 (modelopt) repos are transformer-only; the rest of the pipeline
+# (Qwen3-VL text_encoder, vae, tokenizer, scheduler) comes from the bf16 base.
+FP8_BASE = {
+    "sakamakismile/Krea-2-Turbo-FP8": "krea/Krea-2-Turbo",
+}
+
+# Official recommended sampler settings (krea-ai/krea-2 README):
+#   Turbo — distilled, 8 steps, CFG disabled, mu=1.15, 1k~2k resolution
+#   Raw   — base model, full sampler with CFG, up to 1k resolution
+KREA2_PRESETS = {
+    "turbo": {"steps": 8, "cfg": 0.0, "width": 2048, "height": 2048, "mu": 1.15},
+    "raw": {"steps": 52, "cfg": 3.5, "width": 1024, "height": 1024},
+}
 
 # Appended to the user message: turn the LLM from a formatter into an expander.
 EXPANSION_POLICY = """
@@ -254,10 +294,368 @@ def generate(
     return images
 
 
+# ---------------------------------------------------------------------------
+# Local model resolution (ModelScope preferred, HuggingFace fallback)
+# ---------------------------------------------------------------------------
+
+def _check_local_cache(model_id: str, cache_dir: str = None) -> str | None:
+    """Check if a diffusers model exists in a local cache (ModelScope or HF)."""
+    safe_id = model_id.replace("/", "--")
+
+    # model_index.json for full pipelines; modelopt_state.pth for
+    # transformer-only FP8 (modelopt) repos such as sakamakismile/Krea-2-Turbo-FP8.
+    markers = ("model_index.json", "modelopt_state.pth")
+
+    def _find_snapshot(model_dir: str) -> str | None:
+        """Return the dir containing a model marker (snapshots/ layout or direct)."""
+        for marker in markers:
+            if os.path.isfile(os.path.join(model_dir, marker)):
+                return model_dir
+        snap_root = os.path.join(model_dir, "snapshots")
+        if os.path.isdir(snap_root):
+            for snap in sorted(os.listdir(snap_root), reverse=True):
+                snap_path = os.path.join(snap_root, snap)
+                for marker in markers:
+                    if os.path.isfile(os.path.join(snap_path, marker)):
+                        return snap_path
+        return None
+
+    # ModelScope caches first (preferred, more reliable in China)
+    ms_bases = []
+    if cache_dir:
+        ms_bases.append(cache_dir)
+    ms_bases.extend([
+        os.environ.get("MODELSCOPE_CACHE", ""),
+        "/data/yuanqi.xhf/cache/modelscope",
+        os.path.join(os.path.expanduser("~"), ".cache", "modelscope"),
+    ])
+    for base in ms_bases:
+        if not base:
+            continue
+        hub = os.path.join(base, "hub") if os.path.isdir(os.path.join(base, "hub")) else base
+        # layouts: hub/models/org/name, hub/org/name, hub/models/org--name
+        for sub in ("models", ""):
+            for layout in (os.path.join(*model_id.split("/")), safe_id):
+                model_dir = os.path.join(hub, sub, layout) if sub else os.path.join(hub, layout)
+                found = _find_snapshot(model_dir)
+                if found:
+                    return found
+
+    # HuggingFace cache (models--org--name/snapshots/<rev>)
+    hf_bases = []
+    if cache_dir:
+        hf_bases.append(cache_dir)
+    hf_bases.extend([
+        os.environ.get("HUGGINGFACE_HUB_CACHE", ""),
+        os.environ.get("HF_HOME", ""),
+        "/data/yuanqi.xhf/cache/huggingface/hub",
+        os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub"),
+    ])
+    for base in hf_bases:
+        if not base:
+            continue
+        hf_model_dir = os.path.join(base, f"models--{safe_id}")
+        if os.path.isdir(hf_model_dir):
+            snapshots = sorted(glob.glob(os.path.join(hf_model_dir, "snapshots", "*")),
+                               key=os.path.getmtime, reverse=True)
+            for snap in snapshots:
+                for marker in markers:
+                    if os.path.isfile(os.path.join(snap, marker)):
+                        return snap
+
+    return None
+
+
+# HuggingFace-only repos (no ModelScope mirror) — skip the ModelScope probe.
+HF_ONLY_ORGS = {"sakamakismile"}
+
+# Redundant/non-essential files in Krea repos (single-file checkpoints,
+# docs, gallery images); the diffusers-format sub-directories are enough.
+KREA_IGNORE_PATTERNS = [
+    "turbo.safetensors", "raw.safetensors", "*.pdf", "gallery/*", "images/*",
+]
+
+
+def resolve_model_path(model_id: str, cache_dir: str = None) -> str:
+    """Resolve model to a local path, downloading from ModelScope or HuggingFace."""
+    local_path = _check_local_cache(model_id, cache_dir)
+    if local_path:
+        print(f"Using cached model: {local_path}", file=sys.stderr)
+        return local_path
+
+    # ModelScope first (skip the probe for HF-only repos)
+    if model_id.split("/")[0].lower() in HF_ONLY_ORGS:
+        print(f"{model_id} is HuggingFace-only; skipping ModelScope",
+              file=sys.stderr)
+    else:
+        try:
+            from modelscope.hub.snapshot_download import snapshot_download
+            kwargs = {}
+            if cache_dir:
+                kwargs["cache_dir"] = cache_dir
+            # Krea 2 repos also ship a redundant single-file checkpoint
+            # (turbo.safetensors / raw.safetensors); the diffusers-format
+            # sub-directories are enough — skip them to save ~26 GB.
+            if "krea" in model_id.lower():
+                kwargs["ignore_file_pattern"] = KREA_IGNORE_PATTERNS
+            print(f"Downloading {model_id} from ModelScope...", file=sys.stderr)
+            try:
+                return snapshot_download(model_id, **kwargs)
+            except TypeError:
+                # Older modelscope without ignore_file_pattern
+                kwargs.pop("ignore_file_pattern", None)
+                return snapshot_download(model_id, **kwargs)
+        except ImportError:
+            print("modelscope not installed; trying HuggingFace...", file=sys.stderr)
+        except Exception as e:
+            print(f"ModelScope download failed ({e}); trying HuggingFace...", file=sys.stderr)
+
+    # HuggingFace fallback (use HF_ENDPOINT=https://hf-cdn.sufy.com if blocked)
+    try:
+        # Keep downloads on the big data disk when the default cache is small.
+        os.environ.setdefault("HF_HOME", "/data/yuanqi.xhf/cache/huggingface")
+        from huggingface_hub import snapshot_download as hf_snapshot_download
+        kwargs = {}
+        if cache_dir:
+            kwargs["cache_dir"] = cache_dir
+        if "krea" in model_id.lower():
+            kwargs["ignore_patterns"] = KREA_IGNORE_PATTERNS
+        print(f"Downloading {model_id} from HuggingFace...", file=sys.stderr)
+        return hf_snapshot_download(model_id, **kwargs)
+    except ImportError:
+        print("huggingface_hub not installed; trying download_model...",
+              file=sys.stderr)
+    except Exception as e:
+        print(f"HuggingFace download failed ({e}); trying download_model...",
+              file=sys.stderr)
+
+    try:
+        from download_model import download_from_huggingface
+        return download_from_huggingface(model_id, cache_dir)
+    except Exception as e:
+        print(f"Error: could not download {model_id}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _detect_pipeline(model_path: str) -> str:
+    """Detect pipeline class from model_index.json."""
+    config_path = os.path.join(model_path, "model_index.json")
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            return config.get("_class_name", "")
+        except Exception:
+            pass
+    return ""
+
+
+def _pick_cuda_device() -> str:
+    """Pick the CUDA device with the most free memory."""
+    import torch
+    if torch.cuda.device_count() == 0:
+        print("Error: no CUDA device available", file=sys.stderr)
+        sys.exit(1)
+    best, best_free = "cuda:0", -1
+    for i in range(torch.cuda.device_count()):
+        free, _total = torch.cuda.mem_get_info(i)
+        if free > best_free:
+            best, best_free = f"cuda:{i}", free
+    print(f"Using device {best} ({best_free / 2**30:.1f} GiB free)", file=sys.stderr)
+    return best
+
+
+def _load_krea2_fp8_transformer(base_path: str, fp8_path: str):
+    """Load the FP8 (W8A8) Krea 2 transformer per the
+    sakamakismile/Krea-2-Turbo-FP8 model card: instantiate the base
+    transformer structure, then restore the NVIDIA TensorRT Model Optimizer
+    (modelopt) quantization state on top of it."""
+    import torch
+    from diffusers import Krea2Transformer2DModel
+
+    try:
+        import modelopt.torch.opt as mto
+    except ImportError:
+        print(
+            "Error: FP8 Krea 2 weights (sakamakismile/Krea-2-Turbo-FP8) "
+            "require nvidia-modelopt:\n"
+            "    pip install nvidia-modelopt\n"
+            "Or use the bf16 alias instead: krea2_bf16 / krea2_raw",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    state = os.path.join(fp8_path, "modelopt_state.pth")
+    if not os.path.isfile(state):
+        print(f"Error: {state} not found", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        "Building transformer from bf16 base, then restoring FP8 modelopt state...",
+        file=sys.stderr,
+    )
+    t0 = time.time()
+    transformer = Krea2Transformer2DModel.from_pretrained(
+        base_path, subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    mto.restore(transformer, state)
+    print(f"FP8 transformer ready in {time.time() - t0:.1f}s", file=sys.stderr)
+    return transformer
+
+
+def generate_krea2(
+    model_id: str,
+    prompt: str,
+    width: int = None,
+    height: int = None,
+    steps: int = None,
+    cfg: float = None,
+    seed: int = None,
+    n: int = 1,
+) -> list:
+    """Generate images locally with the Krea 2 diffusers pipeline.
+
+    Returns a list of PIL Images. Defaults follow the official krea-ai/krea-2
+    README recommendations (Turbo: 8 steps, cfg 0.0, 2048x2048;
+    Raw: 52 steps, cfg 3.5, 1024x1024).
+    """
+    # Reduce fragmentation on shared/partially-free GPUs.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    import torch
+
+    try:
+        from diffusers import Krea2Pipeline
+    except ImportError as e:
+        print(
+            "Error: Krea2Pipeline is not available in the installed diffusers.\n"
+            "Krea 2 requires diffusers >= 0.40.0:\n"
+            "    pip install -U diffusers\n"
+            "or install diffusers from source:\n"
+            "    pip install git+https://github.com/huggingface/diffusers.git\n"
+            f"(import error: {e})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    model_path = resolve_model_path(model_id)
+
+    # Transformer-only FP8 repo → rebuild on top of the bf16 base pipeline.
+    fp8 = os.path.isfile(os.path.join(model_path, "modelopt_state.pth"))
+    base_id = FP8_BASE.get(model_id)
+    if fp8 and not base_id:
+        print(
+            f"Error: {model_id} looks like an FP8 (modelopt) transformer repo "
+            f"but has no known bf16 base; add it to FP8_BASE",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    pipeline_cls = _detect_pipeline(model_path)
+    model_lower = model_id.lower()
+    if not (pipeline_cls == "Krea2Pipeline" or "krea" in model_lower):
+        print(
+            f"Error: {model_id} is not a Krea 2 model "
+            f"(detected pipeline: {pipeline_cls or 'unknown'})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    preset = KREA2_PRESETS["turbo"] if "turbo" in model_lower else KREA2_PRESETS["raw"]
+    width = width or preset["width"]
+    height = height or preset["height"]
+    steps = steps or preset["steps"]
+    if cfg is None:
+        cfg = preset["cfg"]
+
+    device = _pick_cuda_device()
+    print(f"Loading {model_id} from {model_path}...", file=sys.stderr)
+    t0 = time.time()
+    if fp8:
+        base_path = resolve_model_path(base_id)
+        transformer = _load_krea2_fp8_transformer(base_path, model_path)
+        pipe = Krea2Pipeline.from_pretrained(
+            base_path, transformer=transformer, torch_dtype=torch.bfloat16
+        )
+    else:
+        pipe = Krea2Pipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+    try:
+        pipe.to(device)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        print("Not enough VRAM to hold the whole pipeline; "
+              "falling back to model CPU offload", file=sys.stderr)
+        pipe.enable_model_cpu_offload(device=device)
+    print(f"Model loaded in {time.time() - t0:.1f}s", file=sys.stderr)
+
+    # Optional timestep-shift mu (official README recommends 1.15 for Turbo);
+    # only pass it if this diffusers version supports it.
+    extra = {}
+    if "mu" in preset:
+        try:
+            params = inspect.signature(pipe.__call__).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "mu" in params:
+            extra["mu"] = preset["mu"]
+
+    images = []
+    i = 0
+    while i < n:
+        generator = None
+        if seed is not None:
+            # CPU offload prepares latents on CPU → generator must live there.
+            gen_device = "cpu" if getattr(pipe, "_offload_gpu_id", None) is not None else device
+            generator = torch.Generator(gen_device).manual_seed(seed + i)
+        print(f"Generating {width}x{height}, {steps} steps, cfg {cfg}...", file=sys.stderr)
+        t0 = time.time()
+        try:
+            out = pipe(
+                prompt,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=cfg,
+                generator=generator,
+                **extra,
+            ).images
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if getattr(pipe, "_offload_gpu_id", None) is None:
+                print("OOM during generation; retrying with model CPU offload",
+                      file=sys.stderr)
+                pipe.enable_model_cpu_offload(device=device)
+                continue  # redo this image
+            if width > 512 or height > 512:
+                # Attention activations grow with seq_len^2 — halve the canvas.
+                width = max(512, (width // 2) // 64 * 64)
+                height = max(512, (height // 2) // 64 * 64)
+                print(f"OOM during generation; retrying at {width}x{height} "
+                      "(pass a smaller --width/--height to skip this)",
+                      file=sys.stderr)
+                continue  # redo this image
+            raise
+        images.extend(out)
+        print(f"Done in {time.time() - t0:.1f}s", file=sys.stderr)
+        i += 1
+    return images
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
+    # First positional arg can be a model alias (local pipeline mode)
+    _used_alias = None
+    if len(sys.argv) > 1 and sys.argv[1] in MODEL_ALIASES:
+        _used_alias = sys.argv[1]
+        sys.argv[1:2] = ["--model", MODEL_ALIASES[_used_alias]]
+
     parser = argparse.ArgumentParser(
-        description="Generate images with ideogram4. Plain-text prompts are "
-                    "expanded to Ideogram 4 JSON captions via qwen3-a."
+        description="Generate images with ideogram4 (default) or a local "
+                    "diffusers model (krea2 FP8, krea2_bf16, krea2_raw). "
+                    "Plain-text prompts are expanded to Ideogram 4 JSON "
+                    "captions via qwen3-a (ideogram4 mode only)."
     )
     parser.add_argument(
         "prompt", nargs="?", default=None,
@@ -265,22 +663,38 @@ def main():
              "when omitted)",
     )
     parser.add_argument(
+        "--model", default=None,
+        help=f"Local model to run instead of ideogram4 "
+             f"(aliases: {', '.join(MODEL_ALIASES)})",
+    )
+    parser.add_argument(
         "-o", "--output", default="output.png",
         help="Output image file (default: output.png)",
     )
-    parser.add_argument("--width", type=int, default=1024, help="Image width (default: 1024)")
-    parser.add_argument("--height", type=int, default=1024, help="Image height (default: 1024)")
-    parser.add_argument("--steps", type=int, default=10, help="Inference steps (default: 10)")
+    parser.add_argument(
+        "--width", type=int, default=None,
+        help="Image width (ideogram4 default: 1024; krea2: 2048 turbo / 1024 raw)",
+    )
+    parser.add_argument(
+        "--height", type=int, default=None,
+        help="Image height (ideogram4 default: 1024; krea2: 2048 turbo / 1024 raw)",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=None,
+        help="Inference steps (ideogram4 default: 10; krea2: 8 turbo / 52 raw)",
+    )
     parser.add_argument(
         "--cfg", type=float, default=None,
-        help="Guidance scale; omit for server-side recommended schedule "
-             "(1.0 = fast mode, no CFG)",
+        help="Guidance scale; ideogram4: omit for server-side recommended "
+             "schedule (1.0 = fast mode, no CFG); krea2: default 0.0 turbo "
+             "(distilled, no CFG) / 3.5 raw",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("-n", "--num-images", type=int, default=1, help="Number of images (default: 1)")
     parser.add_argument(
         "--no-magic", action="store_true",
-        help="Skip JSON expansion via qwen3-a (send the prompt as-is)",
+        help="Skip JSON expansion via qwen3-a (send the prompt as-is; "
+             "implicit for local models)",
     )
 
     args = parser.parse_args()
@@ -294,20 +708,41 @@ def main():
         print("Error: empty prompt", file=sys.stderr)
         sys.exit(1)
 
-    # Expand plain text into Ideogram 4 JSON caption
-    if not args.no_magic:
-        prompt = to_json_prompt(prompt, args.width, args.height)
+    # Local diffusers pipeline mode (Krea 2)
+    if args.model:
+        model_lower = args.model.lower()
+        if "krea" in model_lower:
+            images = generate_krea2(
+                args.model, prompt,
+                width=args.width, height=args.height,
+                steps=args.steps, cfg=args.cfg,
+                seed=args.seed, n=args.num_images,
+            )
+        else:
+            print(
+                f"Error: unsupported local model: {args.model} "
+                f"(supported aliases: {', '.join(MODEL_ALIASES)})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        # ideogram4 MaaS mode
+        width = args.width or 1024
+        height = args.height or 1024
+        steps = args.steps or 10
+        if not args.no_magic:
+            prompt = to_json_prompt(prompt, width, height)
+        print(f"Generating {width}x{height}, {steps} steps...", file=sys.stderr)
+        images = generate(
+            prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance_scale=args.cfg,
+            seed=args.seed,
+            n=args.num_images,
+        )
 
-    print(f"Generating {args.width}x{args.height}, {args.steps} steps...", file=sys.stderr)
-    images = generate(
-        prompt,
-        width=args.width,
-        height=args.height,
-        steps=args.steps,
-        guidance_scale=args.cfg,
-        seed=args.seed,
-        n=args.num_images,
-    )
     if not images:
         print("Error: no images returned", file=sys.stderr)
         sys.exit(1)
