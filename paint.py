@@ -23,9 +23,10 @@ Usage:
 
 Model aliases (local pipelines):
     krea2       Krea 2 Turbo FP8 (sakamakismile/Krea-2-Turbo-FP8) — W8A8
-                quantized transformer (~12.8 GB vs ~25 GB bf16), requires
+                quantized transformer (~12.8 GB vs ~25 GB bf16) + FP8
+                Qwen3-VL text encoder (quantized in-process with modelopt
+                on first use, state cached for later runs), requires
                 `pip install nvidia-modelopt`
-    krea2_bf16  Krea 2 Turbo bf16 (krea/Krea-2-Turbo) — original weights
     krea2_raw   Krea 2 Raw bf16   (krea/Krea-2-Raw)   — base model, full sampler
 
 Environment:
@@ -57,15 +58,38 @@ MAGIC_PROMPT_FILE = os.path.join(
 # diffusers model instead of the ideogram4 MaaS backend.
 MODEL_ALIASES = {
     "krea2": "sakamakismile/Krea-2-Turbo-FP8",
-    "krea2_bf16": "krea/Krea-2-Turbo",
     "krea2_raw": "krea/Krea-2-Raw",
 }
 
+# Aliases that were removed — fail with a helpful message instead of
+# silently treating the word as a prompt (which would hit ideogram4).
+REMOVED_ALIASES = {
+    "krea2_bf16": (
+        "the bf16 Turbo alias was removed; use `krea2` (FP8, near-bf16 "
+        "quality at ~half the VRAM) or `krea2_raw` (bf16 base model)"
+    ),
+}
+
 # FP8 (modelopt) repos are transformer-only; the rest of the pipeline
-# (Qwen3-VL text_encoder, vae, tokenizer, scheduler) comes from the bf16 base.
+# (vae, tokenizer, scheduler) comes from the bf16 base. The Qwen3-VL
+# text_encoder is also taken from the bf16 base but quantized to FP8
+# in-process with modelopt (the FP8 repo ships no text encoder).
 FP8_BASE = {
     "sakamakismile/Krea-2-Turbo-FP8": "krea/Krea-2-Turbo",
 }
+
+# Where the quantized text encoder's modelopt state is cached (next to the
+# bf16 base weights it was quantized from; re-created if missing/corrupt).
+KREA2_TE_FP8_STATE = "text_encoder_fp8_modelopt_state.pth"
+
+# Diverse calibration prompts for the text encoder's FP8 amax calibration
+# (same idea as the transformer repo's "small diverse prompt set").
+KREA2_TE_CALIB_PROMPTS = [
+    "a red fox walking through fresh snow at golden hour, photorealistic",
+    "cyberpunk city street at night, neon signs reflecting in wet asphalt",
+    "watercolor illustration of a cozy reading nook with warm lamplight",
+    "macro photo of a honeybee on a lavender flower, shallow depth of field",
+]
 
 # Official recommended sampler settings (krea-ai/krea-2 README):
 #   Turbo — distilled, 8 steps, CFG disabled, mu=1.15, 1k~2k resolution
@@ -332,14 +356,20 @@ def _check_local_cache(model_id: str, cache_dir: str = None) -> str | None:
     for base in ms_bases:
         if not base:
             continue
-        hub = os.path.join(base, "hub") if os.path.isdir(os.path.join(base, "hub")) else base
+        # Some caches have a hub/ subdir (which may be empty) — check both
+        # hub/ and the cache root so models under <root>/models are found.
+        hubs = []
+        if os.path.isdir(os.path.join(base, "hub")):
+            hubs.append(os.path.join(base, "hub"))
+        hubs.append(base)
         # layouts: hub/models/org/name, hub/org/name, hub/models/org--name
-        for sub in ("models", ""):
-            for layout in (os.path.join(*model_id.split("/")), safe_id):
-                model_dir = os.path.join(hub, sub, layout) if sub else os.path.join(hub, layout)
-                found = _find_snapshot(model_dir)
-                if found:
-                    return found
+        for hub in hubs:
+            for sub in ("models", ""):
+                for layout in (os.path.join(*model_id.split("/")), safe_id):
+                    model_dir = os.path.join(hub, sub, layout) if sub else os.path.join(hub, layout)
+                    found = _find_snapshot(model_dir)
+                    if found:
+                        return found
 
     # HuggingFace cache (models--org--name/snapshots/<rev>)
     hf_bases = []
@@ -480,7 +510,7 @@ def _load_krea2_fp8_transformer(base_path: str, fp8_path: str):
             "Error: FP8 Krea 2 weights (sakamakismile/Krea-2-Turbo-FP8) "
             "require nvidia-modelopt:\n"
             "    pip install nvidia-modelopt\n"
-            "Or use the bf16 alias instead: krea2_bf16 / krea2_raw",
+            "Or use the bf16 alias instead: krea2_raw",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -503,6 +533,101 @@ def _load_krea2_fp8_transformer(base_path: str, fp8_path: str):
     return transformer
 
 
+def _drop_unused_vision_tower(te):
+    """Krea 2 conditions on text only (no pixel_values is ever passed), so
+    the Qwen3-VL vision tower (~0.9 GiB bf16) is dead weight — drop it.
+    Must run after modelopt save/restore (the state covers the full model)."""
+    if getattr(te, "visual", None) is not None:
+        del te.visual
+
+
+def _load_krea2_fp8_text_encoder(base_path: str, device: str):
+    """Load the Qwen3-VL text encoder in FP8.
+
+    The FP8 repo (sakamakismile/Krea-2-Turbo-FP8) is transformer-only, and
+    the community full-FP8 packs (AlperKTS/Krea2_FP8, szwagros) ship the
+    text encoder in ComfyUI single-file format, not diffusers-compatible.
+    So we quantize the bf16 base text encoder in-process with modelopt —
+    the same toolchain as the transformer (FP8_DEFAULT_CFG quantizes only
+    nn.Linear weights+activations; embeddings/norms/vision stay bf16).
+
+    First run calibrates amax on a few prompts, compresses the weights to
+    FP8 (mtq.quantize + mtq.compress, the transformer repo's exact recipe)
+    and caches the modelopt state next to the base weights; later runs
+    restore from that cache.
+    """
+    import torch
+    from transformers import Qwen3VLModel
+
+    try:
+        import modelopt.torch.opt as mto
+        import modelopt.torch.quantization as mtq
+    except ImportError:
+        print(
+            "Error: FP8 Krea 2 (sakamakismile/Krea-2-Turbo-FP8) requires "
+            "nvidia-modelopt for the transformer and text encoder:\n"
+            "    pip install nvidia-modelopt\n"
+            "Or use the bf16 alias instead: krea2_raw",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    t0 = time.time()
+    te = Qwen3VLModel.from_pretrained(
+        base_path, subfolder="text_encoder", torch_dtype=torch.bfloat16
+    )
+
+    state = os.path.join(base_path, KREA2_TE_FP8_STATE)
+    if os.path.isfile(state):
+        try:
+            mto.restore(te, state)
+            _drop_unused_vision_tower(te)
+            print(
+                f"FP8 text encoder ready in {time.time() - t0:.1f}s "
+                f"(restored cached modelopt state: {state})",
+                file=sys.stderr,
+            )
+            return te
+        except Exception as e:
+            print(
+                f"Warning: restoring cached FP8 text encoder state failed "
+                f"({e}); re-quantizing", file=sys.stderr,
+            )
+
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(base_path, subfolder="tokenizer")
+    te = te.to(device)
+
+    def forward_loop(model):
+        for prompt in KREA2_TE_CALIB_PROMPTS:
+            inputs = tokenizer(
+                prompt, return_tensors="pt", truncation=True, max_length=128
+            ).to(device)
+            with torch.inference_mode():
+                model(**inputs)
+
+    print(
+        "FP8 text encoder state not cached; quantizing with modelopt "
+        "(one-time calibration)...", file=sys.stderr,
+    )
+    mtq.quantize(te, mtq.FP8_DEFAULT_CFG, forward_loop)
+    # compress = fold quantization into the weights (fp8 storage), same as
+    # the transformer repo's recipe (mtq.quantize + mtq.compress); without
+    # it the weights stay bf16 and nothing is saved in VRAM.
+    mtq.compress(te)
+    torch.cuda.empty_cache()
+    try:
+        mto.save(te, state)
+        print(f"Cached FP8 text encoder state at {state}", file=sys.stderr)
+    except OSError as e:
+        print(f"Warning: could not cache FP8 text encoder state ({e}); "
+              "will re-quantize next run", file=sys.stderr)
+    te = te.to("cpu")
+    _drop_unused_vision_tower(te)
+    print(f"FP8 text encoder ready in {time.time() - t0:.1f}s", file=sys.stderr)
+    return te
+
+
 def generate_krea2(
     model_id: str,
     prompt: str,
@@ -522,6 +647,20 @@ def generate_krea2(
     """
     # Reduce fragmentation on shared/partially-free GPUs.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # Krea 2's joint attention is GQA + attention-mask, which makes SDPA's
+    # default backend selection fall back to the MATH kernel that
+    # materializes the seq² score matrix (~3.8 GiB at 1024²) — instant OOM
+    # on partially-free GPUs. The cuDNN kernel handles GQA+mask with
+    # near-zero extra VRAM (same numerics), so prefer it. diffusers reads
+    # DIFFUSERS_ATTN_BACKEND at import time → set it before importing;
+    # respect an explicit user override.
+    if "DIFFUSERS_ATTN_BACKEND" not in os.environ:
+        try:
+            from torch.nn.attention import SDPBackend
+            if hasattr(SDPBackend, "CUDNN_ATTENTION"):
+                os.environ["DIFFUSERS_ATTN_BACKEND"] = "_native_cudnn"
+        except ImportError:
+            pass
     import torch
 
     try:
@@ -586,8 +725,10 @@ def generate_krea2(
     if fp8:
         base_path = resolve_model_path(base_id)
         transformer = _load_krea2_fp8_transformer(base_path, model_path)
+        text_encoder = _load_krea2_fp8_text_encoder(base_path, device)
         pipe = Krea2Pipeline.from_pretrained(
-            base_path, transformer=transformer, torch_dtype=torch.bfloat16
+            base_path, transformer=transformer, text_encoder=text_encoder,
+            torch_dtype=torch.bfloat16
         )
     else:
         pipe = Krea2Pipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16)
@@ -606,9 +747,13 @@ def generate_krea2(
             pipe.to(device)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            print("Not enough VRAM to hold the whole pipeline; "
-                  "falling back to model CPU offload", file=sys.stderr)
-            pipe.enable_model_cpu_offload(device=device)
+            print(
+                "Error: not enough VRAM to hold the pipeline on one GPU "
+                "(no CPU-offload fallback by design). Free VRAM on this "
+                "GPU or try --dual-gpu.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     print(f"Model loaded in {time.time() - t0:.1f}s", file=sys.stderr)
 
     # Optional timestep-shift mu (official README recommends 1.15 for Turbo);
@@ -627,9 +772,7 @@ def generate_krea2(
     while i < n:
         generator = None
         if seed is not None:
-            # CPU offload prepares latents on CPU → generator must live there.
-            gen_device = "cpu" if getattr(pipe, "_offload_gpu_id", None) is not None else device
-            generator = torch.Generator(gen_device).manual_seed(seed + i)
+            generator = torch.Generator(device).manual_seed(seed + i)
         print(f"Generating {width}x{height}, {steps} steps, cfg {cfg}...", file=sys.stderr)
         t0 = time.time()
         call_args, call_kwargs = (prompt,), {}
@@ -659,13 +802,9 @@ def generate_krea2(
             ).images
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            if not dual and getattr(pipe, "_offload_gpu_id", None) is None:
-                print("OOM during generation; retrying with model CPU offload",
-                      file=sys.stderr)
-                pipe.enable_model_cpu_offload(device=device)
-                continue  # redo this image
             if width > 512 or height > 512:
                 # Attention activations grow with seq_len^2 — halve the canvas.
+                # (Deliberate policy: no CPU-offload fallback, downscale only.)
                 width = max(512, (width // 2) // 64 * 64)
                 height = max(512, (height // 2) // 64 * 64)
                 print(f"OOM during generation; retrying at {width}x{height} "
@@ -686,13 +825,20 @@ def generate_krea2(
 def main():
     # First positional arg can be a model alias (local pipeline mode)
     _used_alias = None
+    if len(sys.argv) > 1 and sys.argv[1] in REMOVED_ALIASES:
+        print(
+            f"Error: alias '{sys.argv[1]}' was removed — "
+            f"{REMOVED_ALIASES[sys.argv[1]]}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if len(sys.argv) > 1 and sys.argv[1] in MODEL_ALIASES:
         _used_alias = sys.argv[1]
         sys.argv[1:2] = ["--model", MODEL_ALIASES[_used_alias]]
 
     parser = argparse.ArgumentParser(
         description="Generate images with ideogram4 (default) or a local "
-                    "diffusers model (krea2 FP8, krea2_bf16, krea2_raw). "
+                    "diffusers model (krea2 FP8, krea2_raw). "
                     "Plain-text prompts are expanded to Ideogram 4 JSON "
                     "captions via qwen3-a (ideogram4 mode only)."
     )
@@ -758,6 +904,13 @@ def main():
     # Local diffusers pipeline mode (Krea 2)
     if args.model:
         model_lower = args.model.lower()
+        if args.model in REMOVED_ALIASES:
+            print(
+                f"Error: alias '{args.model}' was removed — "
+                f"{REMOVED_ALIASES[args.model]}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         if "krea" in model_lower:
             images = generate_krea2(
                 args.model, prompt,

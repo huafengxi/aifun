@@ -7,7 +7,7 @@ AI tools for fun — Japanese ASMR voice analysis, funscript generation, and AI 
 | Tool | Description |
 |------|-------------|
 | [siko.py](siko.md) | Detect 西口 (siko) instructions in Japanese ASMR audio using Qwen3-ASR-1.7B with forced alignment timestamps |
-| [paint.py](paint.md) | Generate images from text prompts via ideogram4 MaaS or local Krea 2 (FP8/bf16) diffusers pipelines |
+| [paint.py](paint.md) | Generate images from text prompts via ideogram4 MaaS or local Krea 2 (FP8 transformer + FP8 Qwen3-VL text encoder; bf16 Raw) diffusers pipelines |
 | [funscript.py](#funscriptpy) | Convert siko timestamps into funscript format for interactive toys |
 | [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
 | [qwen3_serve.py](#qwen3_servepy) | Serve a Qwen3 LLM with vLLM (OpenAI API) in Docker |

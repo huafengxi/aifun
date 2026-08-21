@@ -37,13 +37,12 @@ echo "cyberpunk city at night" | ./paint.py -o city.png
 
 | Alias | Model | Notes |
 |-------|-------|-------|
-| `krea2` | `sakamakismile/Krea-2-Turbo-FP8` | **FP8 (W8A8)** transformer quantized with NVIDIA TensorRT Model Optimizer; ~12.8 GB vs ~25 GB bf16, near-bf16 quality |
-| `krea2_bf16` | `krea/Krea-2-Turbo` | Original bf16 Turbo — 8-step distilled, no CFG |
+| `krea2` | `sakamakismile/Krea-2-Turbo-FP8` | **FP8 (W8A8)** transformer quantized with NVIDIA TensorRT Model Optimizer; ~12.8 GB vs ~25 GB bf16, near-bf16 quality. **Text encoder (Qwen3-VL) also runs FP8** (quantized in-process with modelopt, state cached) and the unused vision tower is dropped — ~4.3 GB less VRAM |
 | `krea2_raw` | `krea/Krea-2-Raw` | Original bf16 Raw — base model, full sampler |
 
 Defaults follow the official krea-ai/krea-2 README:
 
-- **Turbo** (`krea2`, `krea2_bf16`): 8 steps, `--cfg 0.0` (distilled, no CFG),
+- **Turbo** (`krea2`): 8 steps, `--cfg 0.0` (distilled, no CFG),
   2048×2048, timestep-shift `mu=1.15`.
 - **Raw** (`krea2_raw`): 52 steps, `--cfg 3.5`, 1024×1024.
 
@@ -52,26 +51,56 @@ Defaults follow the official krea-ai/krea-2 README:
 `--dual-gpu` (krea2 only, default **off**) places the transformer on the
 freest GPU and the Qwen3-VL text encoder + VAE on the other. Measured on
 2× RTX 5880 Ada (48 GB, ~25 GB free each while a vLLM worker runs):
-1024² generation 27.4 s vs single-GPU OOM at that free-memory level.
-It only buys VRAM headroom — no denoise speedup (transformer stays on one
-GPU), and 2048² still OOMs (attention needs ~51 GiB on the transformer's
-GPU). Real tensor/sequence parallelism for Krea 2 exists only in
-SGLang-diffusion (`--tp-size` / `--ulysses-degree`), not in diffusers.
-See `runs/2026-08-21-17-12-57-24ge/report.md` for the full evaluation.
+1024² generation 27.4 s. Since the text encoder went FP8 (+ vision-tower
+drop + cuDNN attention, see below) single-GPU 1024² now fits in ~25 GB
+free as well and is faster (13.6 s), so dual-GPU mostly remains an option
+for larger canvases / tighter GPUs. No denoise speedup from the split
+(transformer stays on one GPU), and 2048² still OOMs (attention needs
+~51 GiB on the transformer's GPU). Real tensor/sequence parallelism for
+Krea 2 exists only in SGLang-diffusion (`--tp-size` / `--ulysses-degree`),
+not in diffusers. See `runs/2026-08-21-17-12-57-24ge/report.md` for the
+full evaluation.
 
 ### How FP8 loading works
 
 `sakamakismile/Krea-2-Turbo-FP8` is a **transformer-only** W8A8 quantization
 (`mtq.quantize` + `mtq.compress`). Following its model card, paint.py
 instantiates the transformer from the bf16 base repo (`krea/Krea-2-Turbo`,
-which also provides the Qwen3-VL text encoder, VAE, tokenizer and scheduler)
+which also provides the VAE, tokenizer and scheduler)
 and restores the quantization state with
 `modelopt.torch.opt.restore(transformer, modelopt_state.pth)`.
 
+The FP8 repo ships **no text encoder**, so paint.py also quantizes the base
+repo's Qwen3-VL text encoder to FP8 in-process with the same toolchain
+(`mtq.quantize` + `mtq.compress` with `FP8_DEFAULT_CFG`: linear
+weights+activations → FP8 e4m3; embeddings and norms stay bf16). The
+modelopt state is cached next to the base weights
+(`text_encoder_fp8_modelopt_state.pth`) after a one-time calibration on a
+few prompts, so later runs restore it instantly. (Community full-FP8 packs
+like AlperKTS/Krea2_FP8 only offer the text encoder in ComfyUI single-file
+format, which diffusers can't load — hence in-process quantization.)
+
+Two more VRAM measures for the `krea2` path:
+
+- The Qwen3-VL **vision tower is dropped** (~0.9 GiB): Krea 2 conditions on
+  text only, `pixel_values` is never passed.
+- `DIFFUSERS_ATTN_BACKEND=_native_cudnn` is set before diffusers is
+  imported: the Krea 2 joint attention (GQA + mask) otherwise falls back to
+  SDPA's MATH kernel, which materializes the seq² score matrix (~3.8 GiB at
+  1024²) and OOMs on partially-free GPUs. cuDNN handles it with near-zero
+  extra VRAM and the same numerics. Override via `DIFFUSERS_ATTN_BACKEND`.
+
+Measured on an RTX 5880 Ada with ~25 GB free (vLLM occupying the rest):
+whole-pipeline resident ~16.3 GiB, 1024² generation peak **~21.3 GiB**
+(nvidia-smi) vs **23.2 GiB** for the old bf16-text-encoder build (which
+also needed the CPU-offload fallback to reach 1024²), denoise 13.6 s vs
+36 s. No CPU-offload fallback anymore — on OOM paint.py only halves the
+resolution.
+
 - Requires `pip install nvidia-modelopt` and diffusers ≥ 0.39
   (`Krea2Pipeline`).
-- If the whole pipeline does not fit in VRAM, paint.py automatically falls
-  back to `enable_model_cpu_offload()` (on load OOM or generation OOM).
+- On generation OOM paint.py **halves the resolution** (down to 512²) and
+  retries — by design there is **no CPU-offload fallback**.
 
 ### Downloads & caches
 
@@ -86,7 +115,7 @@ HF-only, no ModelScope mirror). Caches checked: `$MODELSCOPE_CACHE`,
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `prompt` | stdin | Text prompt; `-` or omitted reads from stdin. A leading model alias (`krea2`, `krea2_bf16`, `krea2_raw`) selects a local pipeline instead |
+| `prompt` | stdin | Text prompt; `-` or omitted reads from stdin. A leading model alias (`krea2`, `krea2_raw`) selects a local pipeline instead |
 | `--model` | ideogram4 | Local model to run (alias or repo id); bypasses ideogram4 |
 | `-o`, `--output` | `output.png` | Output image file |
 | `--width` | 1024 (ideogram4); 2048 turbo / 1024 raw (krea2) | Image width (divisible by 16) |
