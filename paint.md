@@ -1,36 +1,34 @@
-# paint.py — Text-to-image via ideogram4 MaaS or local Krea 2
+# paint.py — Text-to-image via local Krea 2 (FP8)
 
-Two backends:
+Single backend: the **local Krea 2 diffusers pipeline**. Bare invocations
+run the `krea2` alias (Krea 2 Turbo FP8); `--model` also accepts a Krea 2
+repo id directly. Weights are downloaded on first use from ModelScope
+(preferred) or HuggingFace.
 
-1. **ideogram4 MaaS** (default, `make ideogram4.start`, port 9114).
-   Plain-text prompts are automatically expanded into Ideogram 4's
-   structured **JSON caption** format via **qwen3-a** (`make qwen3-a.start`,
-   port 9113), using Ideogram's official open-source magic-prompt system
-   prompt (`ideogram4_magic_prompt_v1.txt`).
-2. **Local Krea 2 diffusers pipelines** — select with a model alias as the
-   first positional arg (or `--model`). Weights are downloaded on first use
-   from ModelScope (preferred) or HuggingFace.
+Optional prompt expansion lives in a separate filter, **expand.py**: it
+turns a brief idea into a richly detailed plain-text prompt via qwen3-a
+(`make qwen3-a.start`, port 9113) and never blocks generation (passthrough
+if the LLM is down).
 
 ## Usage
 
 ```bash
-# Plain-text prompt (auto-expanded to JSON by qwen3-a)
+# Bare invocation = krea2 (Turbo FP8)
 ./paint.py "a cat sitting on a cloud" -o cat.png
 
 # Read prompt from stdin
 echo "cyberpunk city at night" | ./paint.py -o city.png
 ./paint.py - --width 1536 --height 864 < prompt.txt
 
-# Prompt is already an Ideogram 4 JSON caption → passed through as-is
-./paint.py '{"high_level_description": "...", "compositional_deconstruction": {...}}'
-
-# Skip qwen3-a expansion entirely
-./paint.py --no-magic "raw prompt"
-
-# Local Krea 2 (first arg = model alias; prompt sent as-is, no magic expansion)
+# Explicit alias / repo id
 ./paint.py krea2 "a fox walking in the snow" -o fox.png
-./paint.py krea2 "a cat" --width 1024 --height 1024 --seed 42 -o cat.png
-./paint.py krea2_raw "a fox" --steps 52 --cfg 3.5 -o fox.png
+./paint.py --model sakamakismile/Krea-2-Turbo-FP8 "a fox" -o fox.png
+
+# Prompt expansion via qwen3-a (plain text, no JSON), piped into paint.py
+echo "a cat" | ./expand.py | ./paint.py -o cat.png
+./expand.py "cyberpunk city at night, 电影感"   # inspect the expansion
+
+./paint.py "a cat" --width 1024 --height 1024 --seed 42 -o cat.png
 ```
 
 ## Local models (Krea 2)
@@ -38,17 +36,18 @@ echo "cyberpunk city at night" | ./paint.py -o city.png
 | Alias | Model | Notes |
 |-------|-------|-------|
 | `krea2` | `sakamakismile/Krea-2-Turbo-FP8` | **FP8 (W8A8)** transformer quantized with NVIDIA TensorRT Model Optimizer; ~12.8 GB vs ~25 GB bf16, near-bf16 quality. **Text encoder (Qwen3-VL) also runs FP8** (quantized in-process with modelopt, state cached) and the unused vision tower is dropped — ~4.3 GB less VRAM |
-| `krea2_raw` | `krea/Krea-2-Raw` | Original bf16 Raw — base model, full sampler |
+
+Removed aliases fail fast with a clear error (exit 2): `krea2_bf16`,
+`krea2_raw` (both superseded by the FP8 `krea2`).
 
 Defaults follow the official krea-ai/krea-2 README:
 
 - **Turbo** (`krea2`): 8 steps, `--cfg 0.0` (distilled, no CFG),
   2048×2048, timestep-shift `mu=1.15`.
-- **Raw** (`krea2_raw`): 52 steps, `--cfg 3.5`, 1024×1024.
 
 ### Experimental dual-GPU component split
 
-`--dual-gpu` (krea2 only, default **off**) places the transformer on the
+`--dual-gpu` (default **off**) places the transformer on the
 freest GPU and the Qwen3-VL text encoder + VAE on the other. Measured on
 2× RTX 5880 Ada (48 GB, ~25 GB free each while a vLLM worker runs):
 1024² generation 27.4 s. Since the text encoder went FP8 (+ vision-tower
@@ -115,29 +114,29 @@ HF-only, no ModelScope mirror). Caches checked: `$MODELSCOPE_CACHE`,
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `prompt` | stdin | Text prompt; `-` or omitted reads from stdin. A leading model alias (`krea2`, `krea2_raw`) selects a local pipeline instead |
-| `--model` | ideogram4 | Local model to run (alias or repo id); bypasses ideogram4 |
+| `prompt` | stdin | Text prompt; `-` or omitted reads from stdin. A leading model alias (`krea2`) selects the pipeline |
+| `--model` | `krea2` | Model to run: alias or a Krea 2 repo id directly |
 | `-o`, `--output` | `output.png` | Output image file |
-| `--width` | 1024 (ideogram4); 2048 turbo / 1024 raw (krea2) | Image width (divisible by 16) |
-| `--height` | 1024 (ideogram4); 2048 turbo / 1024 raw (krea2) | Image height (divisible by 16) |
-| `--steps` | 10 (ideogram4); 8 turbo / 52 raw (krea2) | Inference steps |
-| `--cfg` | server schedule (ideogram4); 0.0 turbo / 3.5 raw (krea2) | Guidance scale; `1.0` = ideogram4 fast mode (no CFG) |
+| `--width` | 2048 (krea2) | Image width (divisible by 16) |
+| `--height` | 2048 (krea2) | Image height (divisible by 16) |
+| `--steps` | 8 (krea2) | Inference steps |
+| `--cfg` | 0.0 (krea2) | Guidance scale (distilled Turbo runs without CFG) |
 | `--seed` | random | Random seed |
 | `-n`, `--num-images` | `1` | Number of images |
-| `--no-magic` | off | Skip JSON expansion, send prompt as-is (implicit for local models) |
+| `--dual-gpu` | off | Experimental component split across two GPUs |
 
 ## Environment
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IDEOGRAM_API` | `http://localhost:9114` | ideogram4 service URL |
-| `QWEN3_API` | `http://localhost:9113` | qwen3-a service URL |
-| `QWEN3_MODEL` | `qwen3.8-a` | qwen3-a model name |
+| `QWEN3_API` | `http://localhost:9113` | qwen3-a service URL (expand.py only) |
+| `QWEN3_MODEL` | `qwen3.8-a` | qwen3-a model name (expand.py only) |
 
 ## Notes
 
-- If qwen3-a is down, expansion falls back to a minimal JSON wrapper so
-  generation still works (lower quality).
-- JSON captions follow the Ideogram 4 schema: `high_level_description` +
-  `compositional_deconstruction` (`background` + `elements[]`), optionally
-  `style_description` with a `color_palette` of uppercase hex colors.
+- expand.py is a plain pipeline filter: if qwen3-a is down it passes the
+  prompt through unchanged (warning on stderr), so generation is never
+  blocked.
+- The ideogram4 MaaS backend, its JSON-caption "magic prompt" expansion and
+  the `krea2_raw`/`krea2_bf16` aliases were removed; everything runs
+  locally on Krea 2 FP8 now.

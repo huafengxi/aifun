@@ -1,72 +1,50 @@
 #!/home/yuanqi.xhf/miniconda3/bin/python
 """
-paint.py — Text-to-image generation.
+paint.py — Text-to-image generation with the local Krea 2 diffusers pipeline.
 
-Two backends:
-
-1. ideogram4 MaaS (default): plain-text prompts are automatically expanded
-   into Ideogram 4's structured JSON caption format using qwen3-a ("magic
-   prompt", driven by Ideogram's official open-source magic-prompt system
-   prompt). Prompts that are already valid JSON are passed through unchanged.
-
-2. Local diffusers pipelines (Krea 2): select with a model alias as the first
-   positional arg (or --model). Weights are downloaded from ModelScope
-   (preferred) or HuggingFace on first use.
+Bare invocations run the `krea2` alias (Krea 2 Turbo FP8). `--model` also
+accepts a repo id directly (any Krea 2 diffusers repo; weights are
+downloaded from ModelScope (preferred) or HuggingFace on first use).
 
 Usage:
     ./paint.py "a cat sitting on a cloud" -o cat.png
     echo "cyberpunk city at night" | ./paint.py -o city.png
     ./paint.py - --width 1536 --height 864 < prompt.txt
-    ./paint.py --no-magic '{"high_level_description": "...", ...}'
     ./paint.py krea2 "a fox walking in the snow" -o fox.png
-    ./paint.py krea2_raw "a fox" --steps 52 --cfg 3.5 -o fox.png
+    echo "a cat" | ./expand.py | ./paint.py -o cat.png   # LLM prompt expansion
 
-Model aliases (local pipelines):
+Model aliases:
     krea2       Krea 2 Turbo FP8 (sakamakismile/Krea-2-Turbo-FP8) — W8A8
                 quantized transformer (~12.8 GB vs ~25 GB bf16) + FP8
                 Qwen3-VL text encoder (quantized in-process with modelopt
                 on first use, state cached for later runs), requires
                 `pip install nvidia-modelopt`
-    krea2_raw   Krea 2 Raw bf16   (krea/Krea-2-Raw)   — base model, full sampler
-
-Environment:
-    IDEOGRAM_API   ideogram4 service URL   (default: http://localhost:9114)
-    QWEN3_API      qwen3-a service URL     (default: http://localhost:9113)
-    QWEN3_MODEL    qwen3-a model name      (default: qwen3.8-a)
 """
 
 import argparse
-import base64
 import glob
 import inspect
-import io
 import json
-import math
 import os
 import sys
 import time
-import urllib.request
 
-IDEOGRAM_API = os.environ.get("IDEOGRAM_API", "http://localhost:9114")
-QWEN3_API = os.environ.get("QWEN3_API", "http://localhost:9113")
-QWEN3_MODEL = os.environ.get("QWEN3_MODEL", "qwen3.8-a")
-MAGIC_PROMPT_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "ideogram4_magic_prompt_v1.txt"
-)
-
-# Model aliases — first positional arg can be an alias to select a local
-# diffusers model instead of the ideogram4 MaaS backend.
+# Model aliases — the first positional arg can be an alias; a bare
+# invocation (no alias, no --model) defaults to `krea2`.
 MODEL_ALIASES = {
     "krea2": "sakamakismile/Krea-2-Turbo-FP8",
-    "krea2_raw": "krea/Krea-2-Raw",
 }
 
 # Aliases that were removed — fail with a helpful message instead of
-# silently treating the word as a prompt (which would hit ideogram4).
+# silently treating the word as a prompt.
 REMOVED_ALIASES = {
     "krea2_bf16": (
         "the bf16 Turbo alias was removed; use `krea2` (FP8, near-bf16 "
-        "quality at ~half the VRAM) or `krea2_raw` (bf16 base model)"
+        "quality at ~half the VRAM)"
+    ),
+    "krea2_raw": (
+        "the bf16 Raw alias was removed; use `krea2` (Turbo FP8, near-bf16 "
+        "quality at ~half the VRAM)"
     ),
 }
 
@@ -92,230 +70,10 @@ KREA2_TE_CALIB_PROMPTS = [
 ]
 
 # Official recommended sampler settings (krea-ai/krea-2 README):
-#   Turbo — distilled, 8 steps, CFG disabled, mu=1.15, 1k~2k resolution
-#   Raw   — base model, full sampler with CFG, up to 1k resolution
+# Turbo — distilled, 8 steps, CFG disabled, mu=1.15, 1k~2k resolution.
 KREA2_PRESETS = {
     "turbo": {"steps": 8, "cfg": 0.0, "width": 2048, "height": 2048, "mu": 1.15},
-    "raw": {"steps": 52, "cfg": 3.5, "width": 1024, "height": 1024},
 }
-
-# Appended to the user message: turn the LLM from a formatter into an expander.
-EXPANSION_POLICY = """
-EXPANSION POLICY: The user idea may be a brief sketch — expand it into a richly
-detailed, complete scene. Fill in medium, style, aesthetics, lighting, background
-detail, plausible secondary elements and in-scene text where appropriate, while
-staying faithful to everything the user explicitly named (never drop or alter
-named subjects, text, colors, or constraints). If the user includes meta
-instructions about how to expand (e.g. desired style, mood, richness, additions,
-"电影感", "细节丰富一点"), treat them as authoritative and follow them first.
-"""
-
-
-def _http_post_json(url: str, payload: dict, timeout: int) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
-
-
-def _load_magic_prompt() -> tuple[str, str]:
-    """Parse the official Ideogram 4 magic-prompt file into (system, user_template)."""
-    with open(MAGIC_PROMPT_FILE, "r") as f:
-        raw = f.read()
-    # File layout: [META] ... [SYSTEM] <system prompt> [USER] <user template>
-    sys_start = raw.index("[SYSTEM]") + len("[SYSTEM]")
-    usr_start = raw.index("[USER]", sys_start)
-    system = raw[sys_start:usr_start].strip()
-    user_template = raw[usr_start + len("[USER]"):].strip()
-    return system, user_template
-
-
-def _aspect_ratio(width: int, height: int) -> str:
-    g = math.gcd(width, height)
-    return f"{width // g}:{height // g}"
-
-
-def _is_json_prompt(prompt: str) -> bool:
-    stripped = prompt.strip()
-    if not stripped.startswith("{"):
-        return False
-    try:
-        return isinstance(json.loads(stripped), dict)
-    except json.JSONDecodeError:
-        return False
-
-
-def _extract_json(text: str) -> dict:
-    """Extract a JSON object from LLM output, tolerating markdown fences."""
-    text = text.strip()
-    if text.startswith("```"):
-        # Strip ```json / ``` fences
-        lines = text.splitlines()
-        lines = lines[1:]  # opening fence
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError(f"no JSON object found in LLM output: {text[:120]!r}")
-    return json.loads(_sanitize_json_text(text[start:end + 1]))
-
-
-def _sanitize_json_text(text: str) -> str:
-    """Escape raw control characters (newlines/tabs) inside JSON string literals."""
-    out = []
-    in_str = False
-    esc = False
-    for ch in text:
-        if in_str:
-            if esc:
-                esc = False
-                out.append(ch)
-            elif ch == "\\":
-                esc = True
-                out.append(ch)
-            elif ch == '"':
-                in_str = False
-                out.append(ch)
-            elif ch == "\n":
-                out.append("\\n")
-            elif ch == "\t":
-                out.append("\\t")
-            elif ch == "\r":
-                out.append("\\r")
-            else:
-                out.append(ch)
-        else:
-            if ch == '"':
-                in_str = True
-            out.append(ch)
-    return "".join(out)
-
-
-def _fallback_wrap(prompt: str) -> str:
-    """Minimal structured caption when the magic-prompt LLM is unavailable."""
-    return json.dumps(
-        {
-            "high_level_description": prompt,
-            "compositional_deconstruction": {
-                "background": "As described by the high level description.",
-                "elements": [{"type": "obj", "desc": prompt}],
-            },
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-
-
-def to_json_prompt(prompt: str, width: int, height: int) -> str:
-    """Expand a plain-text prompt into an Ideogram 4 JSON caption via qwen3-a.
-
-    Passthrough if the prompt is already valid JSON. Falls back to a minimal
-    wrapper if the LLM call fails, so generation is never blocked.
-    """
-    if _is_json_prompt(prompt):
-        return prompt.strip()
-
-    try:
-        system, user_template = _load_magic_prompt()
-    except Exception as e:
-        print(f"magic-prompt file unavailable ({e}), using fallback wrapper", file=sys.stderr)
-        return _fallback_wrap(prompt)
-
-    user = user_template.replace("{{aspect_ratio}}", _aspect_ratio(width, height))
-    user = user.replace("{{original_prompt}}", prompt)
-    user = user + "\n" + EXPANSION_POLICY
-
-    print(f"Expanding prompt to JSON via {QWEN3_MODEL}...", file=sys.stderr)
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
-    content = ""
-    for attempt in range(2):
-        try:
-            result = _http_post_json(
-                f"{QWEN3_API}/v1/chat/completions",
-                {
-                    "model": QWEN3_MODEL,
-                    "messages": messages,
-                    "temperature": 0.7 if attempt == 0 else 0.2,
-                    "max_tokens": 16384,
-                    # Disable thinking: reasoning can exhaust max_tokens before the
-                    # caption is emitted (content=None, finish_reason=length).
-                    "chat_template_kwargs": {"enable_thinking": False},
-                },
-                timeout=180,
-            )
-            content = result["choices"][0]["message"]["content"]
-            if not content:
-                raise ValueError(f"empty content (finish_reason={result['choices'][0].get('finish_reason')})")
-            caption = _extract_json(content)
-            expanded = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
-            print(f"JSON caption ready ({len(expanded)} chars):", file=sys.stderr)
-            print(json.dumps(caption, ensure_ascii=False, indent=2), file=sys.stderr)
-            return expanded
-        except Exception as e:
-            if attempt == 0:
-                print(f"caption JSON invalid ({e}); asking {QWEN3_MODEL} to repair...", file=sys.stderr)
-                messages = [
-                    {"role": "system", "content": "You output exactly one valid minified JSON object. No commentary, no markdown fences."},
-                    {"role": "user", "content": (
-                        f"The following JSON is invalid ({e}). Fix it and output ONLY the "
-                        f"corrected minified JSON, keeping all content unchanged:\n\n{content}"
-                    )},
-                ]
-            else:
-                print(f"magic-prompt expansion failed ({e}), using fallback wrapper", file=sys.stderr)
-                return _fallback_wrap(prompt)
-
-
-def generate(
-    prompt: str,
-    width: int = 1024,
-    height: int = 1024,
-    steps: int = 10,
-    guidance_scale: float = None,
-    seed: int = None,
-    n: int = 1,
-) -> list:
-    """Generate images via the ideogram4 HTTP API. Returns list of PIL Images."""
-    from PIL import Image
-
-    payload = {
-        "prompt": prompt,
-        "height": height,
-        "width": width,
-        "num_inference_steps": steps,
-        "n": n,
-    }
-    # Only send guidance_scale when explicitly set; otherwise the server
-    # applies the model's recommended per-step guidance schedule.
-    if guidance_scale is not None:
-        payload["guidance_scale"] = guidance_scale
-    if seed is not None:
-        payload["seed"] = seed
-
-    try:
-        result = _http_post_json(f"{IDEOGRAM_API}/v1/images/generations", payload, timeout=600)
-    except Exception as e:
-        print(f"Error calling ideogram4 API: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if "error" in result:
-        print(f"ideogram4 API error: {result['error']}", file=sys.stderr)
-        sys.exit(1)
-
-    images = []
-    for item in result.get("data", []):
-        b64 = item.get("b64_json", "")
-        if b64:
-            images.append(Image.open(io.BytesIO(base64.b64decode(b64))))
-    return images
 
 
 # ---------------------------------------------------------------------------
@@ -509,8 +267,7 @@ def _load_krea2_fp8_transformer(base_path: str, fp8_path: str):
         print(
             "Error: FP8 Krea 2 weights (sakamakismile/Krea-2-Turbo-FP8) "
             "require nvidia-modelopt:\n"
-            "    pip install nvidia-modelopt\n"
-            "Or use the bf16 alias instead: krea2_raw",
+            "    pip install nvidia-modelopt",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -566,8 +323,7 @@ def _load_krea2_fp8_text_encoder(base_path: str, device: str):
         print(
             "Error: FP8 Krea 2 (sakamakismile/Krea-2-Turbo-FP8) requires "
             "nvidia-modelopt for the transformer and text encoder:\n"
-            "    pip install nvidia-modelopt\n"
-            "Or use the bf16 alias instead: krea2_raw",
+            "    pip install nvidia-modelopt",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -700,7 +456,8 @@ def generate_krea2(
         )
         sys.exit(1)
 
-    preset = KREA2_PRESETS["turbo"] if "turbo" in model_lower else KREA2_PRESETS["raw"]
+    # Turbo preset; also the sensible default for any other Krea 2 repo id.
+    preset = KREA2_PRESETS["turbo"]
     width = width or preset["width"]
     height = height or preset["height"]
     steps = steps or preset["steps"]
@@ -823,8 +580,7 @@ def generate_krea2(
 # ---------------------------------------------------------------------------
 
 def main():
-    # First positional arg can be a model alias (local pipeline mode)
-    _used_alias = None
+    # First positional arg can be a model alias.
     if len(sys.argv) > 1 and sys.argv[1] in REMOVED_ALIASES:
         print(
             f"Error: alias '{sys.argv[1]}' was removed — "
@@ -833,14 +589,12 @@ def main():
         )
         sys.exit(2)
     if len(sys.argv) > 1 and sys.argv[1] in MODEL_ALIASES:
-        _used_alias = sys.argv[1]
-        sys.argv[1:2] = ["--model", MODEL_ALIASES[_used_alias]]
+        sys.argv[1:2] = ["--model", sys.argv[1]]
 
     parser = argparse.ArgumentParser(
-        description="Generate images with ideogram4 (default) or a local "
-                    "diffusers model (krea2 FP8, krea2_raw). "
-                    "Plain-text prompts are expanded to Ideogram 4 JSON "
-                    "captions via qwen3-a (ideogram4 mode only)."
+        description="Generate images with the local Krea 2 diffusers "
+                    "pipeline (default: krea2 Turbo FP8). "
+                    "Prompt expansion lives in expand.py."
     )
     parser.add_argument(
         "prompt", nargs="?", default=None,
@@ -849,8 +603,8 @@ def main():
     )
     parser.add_argument(
         "--model", default=None,
-        help=f"Local model to run instead of ideogram4 "
-             f"(aliases: {', '.join(MODEL_ALIASES)})",
+        help=f"Model to run: an alias ({', '.join(MODEL_ALIASES)}) or a "
+             f"Krea 2 repo id directly (default: krea2)",
     )
     parser.add_argument(
         "-o", "--output", default="output.png",
@@ -858,29 +612,22 @@ def main():
     )
     parser.add_argument(
         "--width", type=int, default=None,
-        help="Image width (ideogram4 default: 1024; krea2: 2048 turbo / 1024 raw)",
+        help="Image width (krea2 default: 2048)",
     )
     parser.add_argument(
         "--height", type=int, default=None,
-        help="Image height (ideogram4 default: 1024; krea2: 2048 turbo / 1024 raw)",
+        help="Image height (krea2 default: 2048)",
     )
     parser.add_argument(
         "--steps", type=int, default=None,
-        help="Inference steps (ideogram4 default: 10; krea2: 8 turbo / 52 raw)",
+        help="Inference steps (krea2 default: 8)",
     )
     parser.add_argument(
         "--cfg", type=float, default=None,
-        help="Guidance scale; ideogram4: omit for server-side recommended "
-             "schedule (1.0 = fast mode, no CFG); krea2: default 0.0 turbo "
-             "(distilled, no CFG) / 3.5 raw",
+        help="Guidance scale (krea2 default: 0.0 — distilled, no CFG)",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("-n", "--num-images", type=int, default=1, help="Number of images (default: 1)")
-    parser.add_argument(
-        "--no-magic", action="store_true",
-        help="Skip JSON expansion via qwen3-a (send the prompt as-is; "
-             "implicit for local models)",
-    )
     parser.add_argument(
         "--dual-gpu", action="store_true",
         help="Experimental (krea2 only): split components across two GPUs "
@@ -901,48 +648,36 @@ def main():
         print("Error: empty prompt", file=sys.stderr)
         sys.exit(1)
 
-    # Local diffusers pipeline mode (Krea 2)
-    if args.model:
-        model_lower = args.model.lower()
-        if args.model in REMOVED_ALIASES:
-            print(
-                f"Error: alias '{args.model}' was removed — "
-                f"{REMOVED_ALIASES[args.model]}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        if "krea" in model_lower:
-            images = generate_krea2(
-                args.model, prompt,
-                width=args.width, height=args.height,
-                steps=args.steps, cfg=args.cfg,
-                seed=args.seed, n=args.num_images,
-                dual_gpu=args.dual_gpu,
-            )
-        else:
-            print(
-                f"Error: unsupported local model: {args.model} "
-                f"(supported aliases: {', '.join(MODEL_ALIASES)})",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    else:
-        # ideogram4 MaaS mode
-        width = args.width or 1024
-        height = args.height or 1024
-        steps = args.steps or 10
-        if not args.no_magic:
-            prompt = to_json_prompt(prompt, width, height)
-        print(f"Generating {width}x{height}, {steps} steps...", file=sys.stderr)
-        images = generate(
-            prompt,
-            width=width,
-            height=height,
-            steps=steps,
-            guidance_scale=args.cfg,
-            seed=args.seed,
-            n=args.num_images,
+    # Bare invocation → krea2 alias (Turbo FP8).
+    if not args.model:
+        args.model = MODEL_ALIASES["krea2"]
+
+    if args.model in REMOVED_ALIASES:
+        print(
+            f"Error: alias '{args.model}' was removed — "
+            f"{REMOVED_ALIASES[args.model]}",
+            file=sys.stderr,
         )
+        sys.exit(2)
+    if args.model in MODEL_ALIASES:
+        args.model = MODEL_ALIASES[args.model]
+
+    if "krea" in args.model.lower():
+        images = generate_krea2(
+            args.model, prompt,
+            width=args.width, height=args.height,
+            steps=args.steps, cfg=args.cfg,
+            seed=args.seed, n=args.num_images,
+            dual_gpu=args.dual_gpu,
+        )
+    else:
+        print(
+            f"Error: unsupported model: {args.model} "
+            f"(supported aliases: {', '.join(MODEL_ALIASES)}; or pass a "
+            f"Krea 2 repo id)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if not images:
         print("Error: no images returned", file=sys.stderr)
