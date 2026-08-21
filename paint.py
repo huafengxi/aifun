@@ -21,6 +21,10 @@ Model aliases:
                 Qwen3-VL text encoder (quantized in-process with modelopt
                 on first use, state cached for later runs), requires
                 `pip install nvidia-modelopt`
+    krea2nsfw   krea2 + "Krea 2 NSFW V3" LoRA (Sentinel7/krea2, Civitai
+                2725430/3071760, weights at ~/m/models/krea2-nsfw-v3/).
+                Base is loaded once (no duplicate VRAM); LoRA scale 1.0
+                per the model README. Local mode only.
 """
 
 import argparse
@@ -36,6 +40,22 @@ import time
 MODEL_ALIASES = {
     "krea2": "sakamakismile/Krea-2-Turbo-FP8",
 }
+
+# LoRA aliases — load the base pipeline once, then attach the LoRA on top
+# (no second copy of the base is loaded). Local mode only: a `serve`
+# instance holds plain base weights.
+KREA2_LORAS = {
+    "krea2nsfw": {
+        "base": "sakamakismile/Krea-2-Turbo-FP8",
+        "path": "~/m/models/krea2-nsfw-v3",
+        "weight_name": "KNPV3_1.safetensors",
+        # README (Sentinel7/krea2, Civitai 2725430/3071760): strength 1-1.5,
+        # no trigger words.
+        "scale": 1.0,
+    },
+}
+
+ALL_ALIASES = {**MODEL_ALIASES, **KREA2_LORAS}
 
 # Aliases that were removed — fail with a helpful message instead of
 # silently treating the word as a prompt.
@@ -411,6 +431,7 @@ def generate_krea2(
     seed: int = None,
     n: int = 1,
     dual_gpu: bool = False,
+    lora: dict = None,
 ) -> list:
     """Generate images locally with the Krea 2 diffusers pipeline.
 
@@ -418,7 +439,7 @@ def generate_krea2(
     README recommendations (Turbo: 8 steps, cfg 0.0, 2048x2048).
     """
     import torch
-    ctx = load_krea2_pipeline(model_id, dual_gpu=dual_gpu)
+    ctx = load_krea2_pipeline(model_id, dual_gpu=dual_gpu, lora=lora)
     preset = ctx["preset"]
     width = width or preset["width"]
     height = height or preset["height"]
@@ -449,9 +470,11 @@ def generate_krea2(
     return images
 
 
-def load_krea2_pipeline(model_id: str, dual_gpu: bool = False) -> dict:
+def load_krea2_pipeline(model_id: str, dual_gpu: bool = False,
+                        lora: dict = None) -> dict:
     """Load the Krea 2 pipeline once and return a render context (used by
-    both the one-shot CLI path and `paint.py serve`)."""
+    both the one-shot CLI path and `paint.py serve`). Optionally attach a
+    LoRA on top of the loaded base (see KREA2_LORAS)."""
     import torch  # noqa: F401  (also ensures CUDA init happens here)
     _prepare_krea2_env()
 
@@ -541,6 +564,25 @@ def load_krea2_pipeline(model_id: str, dual_gpu: bool = False) -> dict:
                 file=sys.stderr,
             )
             sys.exit(1)
+    if lora:
+        lora_dir = os.path.expanduser(lora["path"])
+        adapter = "paint_lora"
+        print(f"Attaching LoRA {os.path.join(lora_dir, lora['weight_name'])} "
+              f"(scale {lora['scale']})...", file=sys.stderr)
+        t1 = time.time()
+        pipe.load_lora_weights(lora_dir, weight_name=lora["weight_name"],
+                               adapter_name=adapter)
+        # PEFT initializes LoRA params with the base layer's dtype — on the
+        # modelopt-FP8 transformer that is Float8_e4m3fn, which has no addmm
+        # kernel. Cast the LoRA delta back to bf16 (base weights untouched).
+        import torch as _torch
+        for name, param in pipe.transformer.named_parameters():
+            if "lora" in name and param.dtype != _torch.bfloat16:
+                param.data = param.data.to(_torch.bfloat16)
+        # set_adapters keeps the delta in PEFT hooks at runtime (no fuse),
+        # which is what works on top of the modelopt-FP8 transformer.
+        pipe.set_adapters([adapter], adapter_weights=[lora["scale"]])
+        print(f"LoRA attached in {time.time() - t1:.1f}s", file=sys.stderr)
     print(f"Model loaded in {time.time() - t0:.1f}s", file=sys.stderr)
 
     # Optional timestep-shift mu (official README recommends 1.15 for Turbo);
@@ -796,7 +838,7 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    if len(sys.argv) > 1 and sys.argv[1] in MODEL_ALIASES:
+    if len(sys.argv) > 1 and sys.argv[1] in ALL_ALIASES:
         sys.argv[1:2] = ["--model", sys.argv[1]]
 
     parser = argparse.ArgumentParser(
@@ -811,7 +853,7 @@ def main():
     )
     parser.add_argument(
         "--model", default=None,
-        help=f"Model to run: an alias ({', '.join(MODEL_ALIASES)}) or a "
+        help=f"Model to run: an alias ({', '.join(ALL_ALIASES)}) or a "
              f"Krea 2 repo id directly (default: krea2)",
     )
     parser.add_argument(
@@ -867,6 +909,16 @@ def main():
     if not args.model:
         args.model = MODEL_ALIASES["krea2"]
 
+    # LoRA aliases (e.g. krea2nsfw) run locally only — a serve instance
+    # holds the plain base weights.
+    lora_cfg = KREA2_LORAS.get(args.model)
+    if lora_cfg and args.server:
+        print(
+            f"Error: LoRA alias '{args.model}' is local-only; the serve "
+            f"instance holds the plain base model", file=sys.stderr,
+        )
+        sys.exit(2)
+
     # Thin client mode: forward to a running `paint.py serve`.
     if args.server:
         if args.num_images != 1:
@@ -893,6 +945,8 @@ def main():
         sys.exit(2)
     if args.model in MODEL_ALIASES:
         args.model = MODEL_ALIASES[args.model]
+    if lora_cfg:
+        args.model = lora_cfg["base"]
 
     if "krea" in args.model.lower():
         images = generate_krea2(
@@ -901,11 +955,12 @@ def main():
             steps=args.steps, cfg=args.cfg,
             seed=args.seed, n=args.num_images,
             dual_gpu=args.dual_gpu,
+            lora=lora_cfg,
         )
     else:
         print(
             f"Error: unsupported model: {args.model} "
-            f"(supported aliases: {', '.join(MODEL_ALIASES)}; or pass a "
+            f"(supported aliases: {', '.join(ALL_ALIASES)}; or pass a "
             f"Krea 2 repo id)",
             file=sys.stderr,
         )
