@@ -153,9 +153,11 @@ curl -s -X POST http://127.0.0.1:8098/v1/images/generations \
 ```
 
 `enable_cache_dit`: `true`/`false` per request, or unset to follow the
-server default (`SGLANG_CACHE_DIT_ENABLED`, injected by
-`KREA2_CACHE_DIT=1 make krea2.start`; `KREA2_CACHE_DIT_TAYLORSEER=N`
-passes TaylorSeer order N; default off, backward compatible).
+server default. Cache-DiT is **on by default**: `make krea2.start`
+injects `SGLANG_CACHE_DIT_ENABLED=1` plus TaylorSeer
+(`SGLANG_CACHE_DIT_TAYLORSEER=1`, order from `KREA2_CACHE_DIT_TAYLORSEER`,
+default 1). To disable server-side: `KREA2_CACHE_DIT=0 make krea2.start`
+(`0` or empty both mean off).
 `cache_dit_params` accepts DBCache knobs (`Fn_compute_blocks`,
 `Bn_compute_blocks`, `max_warmup_steps`, `residual_diff_threshold`,
 `max_continuous_cached_steps`, `enable_taylorseer`, `taylorseer_order`)
