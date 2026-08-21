@@ -512,6 +512,7 @@ def generate_krea2(
     cfg: float = None,
     seed: int = None,
     n: int = 1,
+    dual_gpu: bool = False,
 ) -> list:
     """Generate images locally with the Krea 2 diffusers pipeline.
 
@@ -567,7 +568,19 @@ def generate_krea2(
     if cfg is None:
         cfg = preset["cfg"]
 
-    device = _pick_cuda_device()
+    dual = dual_gpu and torch.cuda.device_count() >= 2
+    if dual:
+        # Experimental component split (see runs/2026-08-21-17-12-57-24ge):
+        # transformer on the freest GPU, text encoder + VAE on the other.
+        # Adds headroom on shared GPUs; no denoise speedup, no 2048² fix.
+        frees = [torch.cuda.mem_get_info(i)[0] for i in range(torch.cuda.device_count())]
+        order = sorted(range(len(frees)), key=lambda i: -frees[i])
+        dev0, dev1 = f"cuda:{order[0]}", f"cuda:{order[1]}"
+        device = dev0
+        print(f"dual-GPU experimental mode: transformer@{dev0}, "
+              f"text_encoder+vae@{dev1}", file=sys.stderr)
+    else:
+        device = _pick_cuda_device()
     print(f"Loading {model_id} from {model_path}...", file=sys.stderr)
     t0 = time.time()
     if fp8:
@@ -578,13 +591,24 @@ def generate_krea2(
         )
     else:
         pipe = Krea2Pipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16)
-    try:
-        pipe.to(device)
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        print("Not enough VRAM to hold the whole pipeline; "
-              "falling back to model CPU offload", file=sys.stderr)
-        pipe.enable_model_cpu_offload(device=device)
+    if dual:
+        pipe.transformer.to(dev0)
+        pipe.text_encoder.to(dev1)
+        pipe.vae.to(dev1)
+        _vae_dev = torch.device(dev1)
+        _orig_decode = pipe.vae.decode
+        pipe.vae.decode = lambda z, **kw: _orig_decode(z.to(_vae_dev), **kw)
+        # pipeline derives _execution_device from its first component (vae)
+        type(pipe)._execution_device = property(
+            lambda self: torch.device(dev0))
+    else:
+        try:
+            pipe.to(device)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print("Not enough VRAM to hold the whole pipeline; "
+                  "falling back to model CPU offload", file=sys.stderr)
+            pipe.enable_model_cpu_offload(device=device)
     print(f"Model loaded in {time.time() - t0:.1f}s", file=sys.stderr)
 
     # Optional timestep-shift mu (official README recommends 1.15 for Turbo);
@@ -608,19 +632,34 @@ def generate_krea2(
             generator = torch.Generator(gen_device).manual_seed(seed + i)
         print(f"Generating {width}x{height}, {steps} steps, cfg {cfg}...", file=sys.stderr)
         t0 = time.time()
+        call_args, call_kwargs = (prompt,), {}
+        if dual:
+            # encode on the text encoder's GPU, denoise on the transformer's
+            emb_dev = torch.device(dev1)
+            pe, pem = pipe.encode_prompt(prompt=prompt, device=emb_dev,
+                                         num_images_per_prompt=1)
+            call_kwargs["prompt_embeds"] = pe.to(dev0)
+            call_kwargs["prompt_embeds_mask"] = pem.to(dev0)
+            if cfg > 1:
+                npe, npem = pipe.encode_prompt(prompt="", device=emb_dev,
+                                               num_images_per_prompt=1)
+                call_kwargs["negative_prompt_embeds"] = npe.to(dev0)
+                call_kwargs["negative_prompt_embeds_mask"] = npem.to(dev0)
+            call_args = ()
         try:
             out = pipe(
-                prompt,
+                *call_args,
                 width=width,
                 height=height,
                 num_inference_steps=steps,
                 guidance_scale=cfg,
                 generator=generator,
                 **extra,
+                **call_kwargs,
             ).images
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            if getattr(pipe, "_offload_gpu_id", None) is None:
+            if not dual and getattr(pipe, "_offload_gpu_id", None) is None:
                 print("OOM during generation; retrying with model CPU offload",
                       file=sys.stderr)
                 pipe.enable_model_cpu_offload(device=device)
@@ -696,6 +735,14 @@ def main():
         help="Skip JSON expansion via qwen3-a (send the prompt as-is; "
              "implicit for local models)",
     )
+    parser.add_argument(
+        "--dual-gpu", action="store_true",
+        help="Experimental (krea2 only): split components across two GPUs "
+             "(transformer on the freest GPU, text encoder + VAE on the "
+             "other). Adds VRAM headroom on shared GPUs; no denoise "
+             "speedup and does not enable 2048² (see "
+             "runs/2026-08-21-17-12-57-24ge report). Default: off.",
+    )
 
     args = parser.parse_args()
 
@@ -717,6 +764,7 @@ def main():
                 width=args.width, height=args.height,
                 steps=args.steps, cfg=args.cfg,
                 seed=args.seed, n=args.num_images,
+                dual_gpu=args.dual_gpu,
             )
         else:
             print(

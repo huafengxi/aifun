@@ -47,6 +47,18 @@ Defaults follow the official krea-ai/krea-2 README:
   2048×2048, timestep-shift `mu=1.15`.
 - **Raw** (`krea2_raw`): 52 steps, `--cfg 3.5`, 1024×1024.
 
+### Experimental dual-GPU component split
+
+`--dual-gpu` (krea2 only, default **off**) places the transformer on the
+freest GPU and the Qwen3-VL text encoder + VAE on the other. Measured on
+2× RTX 5880 Ada (48 GB, ~25 GB free each while a vLLM worker runs):
+1024² generation 27.4 s vs single-GPU OOM at that free-memory level.
+It only buys VRAM headroom — no denoise speedup (transformer stays on one
+GPU), and 2048² still OOMs (attention needs ~51 GiB on the transformer's
+GPU). Real tensor/sequence parallelism for Krea 2 exists only in
+SGLang-diffusion (`--tp-size` / `--ulysses-degree`), not in diffusers.
+See `runs/2026-08-21-17-12-57-24ge/report.md` for the full evaluation.
+
 ### How FP8 loading works
 
 `sakamakismile/Krea-2-Turbo-FP8` is a **transformer-only** W8A8 quantization
