@@ -100,6 +100,43 @@ Krea 2 exists only in SGLang-diffusion (`--tp-size` / `--ulysses-degree`),
 not in diffusers. See `runs/2026-08-21-17-12-57-24ge/report.md` for the
 full evaluation.
 
+### SGLang-diffusion backend (2×GPU, faster + 2048²)
+
+A separate, Docker-based serving route for Krea-2 using SGLang-diffusion
+(native pipeline, `--tp-size 2` + online `--quantization fp8`). Managed by
+`make krea2.start` / `krea2.stop` / `krea2.status` (registered in
+`~/m/env/services.yml`, desired **offline**, binds `127.0.0.1:8098`).
+paint.py stays the diffusers single-GPU fallback and is not involved.
+
+```bash
+make krea2.start    # docker run; ready in ~60s (docker logs -f krea2-sglang)
+make krea2.status   # probes GET /health
+make krea2.stop     # docker rm -f (releases both GPUs)
+
+# OpenAI-compatible images API (seed/size/steps are request-time)
+curl -s -X POST http://127.0.0.1:8098/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"krea2","prompt":"a cat","size":"1024x1024","seed":42,
+       "num_inference_steps":8,"response_format":"b64_json"}'
+```
+
+Measured on 2× RTX 5880 Ada (vLLM resident, ~24.7 GiB free/card), same
+prompt/seed as the paint.py baseline (1024², 8 steps, seed 42):
+
+| Backend | 1024² steady | 2048² | Peak VRAM/card |
+|---------|--------------|-------|----------------|
+| paint.py serve (FP8, 1 GPU) | 13.5 s | OOM | ~20.5 G |
+| SGLang tp2 bf16 | 6.8 s | 29 s | 45.5 / 47.1 G |
+| SGLang tp2 + online fp8 | **4.7 s** | **21 s** | 46.4 G |
+
+`--ulysses-degree 2` (bitwise-identical SP) does not fit here: bf16 keeps
+the full 25 GB DiT per card (23.8 G vLLM + 23 G DiT > 47.4 G → OOM), and
+online fp8 is not supported under SP (loader error). Use tp2. The mount
+path must contain `Krea-2` (e.g. `/models/Krea-2-Turbo`) so the native
+pipeline registry matches; `--component-residency
+text_encoder=component-offload` keeps the Qwen3-VL TE on CPU between uses.
+Details: `runs/2026-08-21-22-35-26-kwv2/report.md`.
+
 ### How FP8 loading works
 
 `sakamakismile/Krea-2-Turbo-FP8` is a **transformer-only** W8A8 quantization
