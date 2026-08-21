@@ -53,6 +53,24 @@ Same single file, stdlib HTTP only, no new dependencies; requests are
 serialized; outputs are bit-identical to one-shot mode for the same seed.
 Default behavior (no `serve`, no `--server`) is unchanged.
 
+#### Service management (make)
+
+The resident server is managed like every other workspace service —
+`make paint.start` / `paint.stop` / `paint.status` (registered in
+`env/services.yml`). It binds `127.0.0.1:8097` **without `--idle-exit`**
+(stays resident), logs to `logs/paint-serve.log`, and `paint.status`
+probes `GET /health` (exit 0 = online).
+
+Because the pipeline holds ~20.5 GB VRAM alongside the vLLM workers, the
+desired state is **offline**: `svc.sync` will not auto-revive it. Bring it
+up on demand:
+
+```bash
+make paint.start    # start when needed (load takes ~17 s)
+make paint.status   # curl -s -m 5 http://127.0.0.1:8097/health
+make paint.stop     # graceful SIGTERM via pkill
+```
+
 ## Local models (Krea 2)
 
 | Alias | Model | Notes |
