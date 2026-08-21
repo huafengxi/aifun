@@ -17,6 +17,7 @@ import argparse
 import io
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -40,6 +41,15 @@ def _fuzz_str(s):
 # WebDAV helpers
 # ---------------------------------------------------------------------------
 
+def _dec_secret(cipher):
+    """Decrypt an enc1: cipher value via bin/envdec.py (in-memory only)."""
+    envdec = os.path.join(os.path.dirname(__file__), "..", "bin", "envdec.py")
+    return subprocess.run(
+        [sys.executable, envdec, "--value", cipher],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
 def _load_webdav_env():
     """Load WebDAV credentials from env files."""
     env = {}
@@ -59,6 +69,8 @@ def _load_webdav_env():
                     val = m.group(2).strip()
                     if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
                         val = val[1:-1]
+                    if val.startswith("enc1:"):
+                        val = _dec_secret(val[5:])
                     env[m.group(1)] = val
             break
 
