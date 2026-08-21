@@ -137,6 +137,46 @@ pipeline registry matches; `--component-residency
 text_encoder=component-offload` keeps the Qwen3-VL TE on CPU between uses.
 Details: `runs/2026-08-21-22-35-26-kwv2/report.md`.
 
+#### Cache-DiT (per-request DiT cache acceleration)
+
+SGLang-diffusion integrates [Cache-DiT](https://docs.sglang.io/docs/sglang-diffusion/cache_dit)
+(DBCache block cache + TaylorSeer correction + SCM step masking). It is a
+**per-request** switch on the images API — no restart needed:
+
+```bash
+curl -s -X POST http://127.0.0.1:8098/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"krea2","prompt":"a cat","size":"1024x1024","seed":42,
+       "num_inference_steps":8,"response_format":"b64_json",
+       "enable_cache_dit":true,
+       "cache_dit_params":{"enable_taylorseer":true,"taylorseer_order":1}}'
+```
+
+`enable_cache_dit`: `true`/`false` per request, or unset to follow the
+server default (`SGLANG_CACHE_DIT_ENABLED`, injected by
+`KREA2_CACHE_DIT=1 make krea2.start`; `KREA2_CACHE_DIT_TAYLORSEER=N`
+passes TaylorSeer order N; default off, backward compatible).
+`cache_dit_params` accepts DBCache knobs (`Fn_compute_blocks`,
+`Bn_compute_blocks`, `max_warmup_steps`, `residual_diff_threshold`,
+`max_continuous_cached_steps`, `enable_taylorseer`, `taylorseer_order`)
+and SCM knobs (`scm_preset`, ...).
+
+Bench (same prompt/seed, 3 steady runs after warmup, vLLM resident;
+runs/2026-08-21-23-51-55-7qfl):
+
+| Config | 1024² | 2048² | Peak VRAM/card |
+|--------|-------|-------|----------------|
+| A baseline (cache off) | 4.67 s | 21.17 s | 39.3 / 46.4 G |
+| B DBCache defaults | 3.92 s (1.19x) | 17.61 s (1.20x) | 39.4 / 46.9 G |
+| C DBCache + TaylorSeer o1 | 3.94 s (1.19x) | 17.42 s (1.22x) | 39.6 / 46.0 G |
+| D C + SCM medium | 3.99 s (1.17x) | 17.34 s (1.22x) | 39.6 / 47.5 G |
+
+Recommended: **C** (DBCache + TaylorSeer order 1) — ~1.2x at both sizes,
+visually lossless on photoreal / gongbi / anime portraits (side-by-side in
+`temp/krea2-cachedit/`). SCM adds nothing at Turbo's 8 steps (docs: SCM
+needs >= 8 steps and is marginal at the floor). Cache-DiT adds ~0.1-1 G
+peak VRAM per card — still coexists with vLLM.
+
 ### How FP8 loading works
 
 `sakamakismile/Krea-2-Turbo-FP8` is a **transformer-only** W8A8 quantization
