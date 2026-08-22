@@ -24,7 +24,7 @@
 用法示例:
     ./imgsave.py out.png out.jpg
     jq -r .data[0].b64_json resp.json | tee b64.txt >/dev/null && ./imgsave.py b64.txt out.jpg 95
-    ./imgsave.py --dir ~/m/temp/some-gen --delete-src
+    ./imgsave.py --dir ~/m/run/temp/some-gen --delete-src
 """
 import argparse
 import base64

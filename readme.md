@@ -17,7 +17,7 @@ AI tools for fun — Japanese ASMR voice analysis, funscript generation, and AI 
 ### qwen3_serve.py
 
 Serves a Qwen3 LLM as an OpenAI-compatible API using vLLM in Docker.
-Models are downloaded from ModelScope (preferred) into `~/m/models` first.
+Models are downloaded from ModelScope (preferred) into `~/m/run/models` first.
 
 ```bash
 make -C ~/m qwen3.start      # download (if needed) + start vLLM on :8000

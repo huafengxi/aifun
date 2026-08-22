@@ -22,7 +22,7 @@ Model aliases:
                 on first use, state cached for later runs), requires
                 `pip install nvidia-modelopt`
     krea2nsfw   krea2 + "Krea 2 NSFW V3" LoRA (Sentinel7/krea2, Civitai
-                2725430/3071760, weights at ~/m/models/krea2-nsfw-v3/).
+                2725430/3071760, weights at ~/m/run/models/krea2-nsfw-v3/).
                 Base is loaded once (no duplicate VRAM); LoRA scale 1.0
                 per the model README. Local mode only.
 """
@@ -47,7 +47,7 @@ MODEL_ALIASES = {
 KREA2_LORAS = {
     "krea2nsfw": {
         "base": "sakamakismile/Krea-2-Turbo-FP8",
-        "path": "~/m/models/krea2-nsfw-v3",
+        "path": "~/m/run/models/krea2-nsfw-v3",
         "weight_name": "KNPV3_1.safetensors",
         # README (Sentinel7/krea2, Civitai 2725430/3071760): strength 1-1.5,
         # no trigger words.
@@ -102,11 +102,11 @@ KREA2_PRESETS = {
 # Local model resolution (ModelScope preferred, HuggingFace fallback)
 # ---------------------------------------------------------------------------
 
-# maas-managed weights (~/m/models, see maas/krea2/) — checked before any
+# maas-managed weights (~/m/run/models, see maas/krea2/) — checked before any
 # download cache; the cache paths below remain as fallback.
 MAAS_MODEL_DIRS = {
-    "krea/Krea-2-Turbo": "~/m/models/krea2-turbo",
-    "sakamakismile/Krea-2-Turbo-FP8": "~/m/models/krea2-turbo-fp8",
+    "krea/Krea-2-Turbo": "~/m/run/models/krea2-turbo",
+    "sakamakismile/Krea-2-Turbo-FP8": "~/m/run/models/krea2-turbo-fp8",
 }
 
 

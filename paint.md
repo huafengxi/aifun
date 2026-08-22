@@ -61,7 +61,7 @@ Default behavior (no `serve`, no `--server`) is unchanged.
 > :8098). To run a resident diffusers server manually:
 
 ```bash
-nohup ./paint.py serve --host 127.0.0.1 --port 8097 >> ../logs/paint-serve.log 2>&1 &
+nohup ./paint.py serve --host 127.0.0.1 --port 8097 >> ../run/logs/paint-serve.log 2>&1 &
 curl -s -m 5 http://127.0.0.1:8097/health   # probe
 pkill -f '[p]aint.py serve'                  # stop
 ```
@@ -200,7 +200,7 @@ runs/2026-08-21-23-51-55-7qfl):
 
 Recommended: **C** (DBCache + TaylorSeer order 1) — ~1.2x at both sizes,
 visually lossless on photoreal / gongbi / anime portraits (side-by-side in
-`temp/krea2-cachedit/`). SCM adds nothing at Turbo's 8 steps (docs: SCM
+`run/temp/krea2-cachedit/`). SCM adds nothing at Turbo's 8 steps (docs: SCM
 needs >= 8 steps and is marginal at the floor). Cache-DiT adds ~0.1-1 G
 peak VRAM per card — still coexists with vLLM.
 
