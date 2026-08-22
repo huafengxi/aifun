@@ -278,7 +278,7 @@ HF-only, no ModelScope mirror). Caches checked: `$MODELSCOPE_CACHE`,
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QWEN3_API` | `http://localhost:9113` | qwen3-a service URL (expand.py only) |
-| `QWEN3_MODEL` | `qwen3.8-a` | qwen3-a model name (expand.py only) |
+| `QWEN3_MODEL` | `qwen3` | qwen3-a model name (expand.py only) |
 
 ## Notes
 

@@ -18,7 +18,7 @@ blocked.
 
 Environment:
     QWEN3_API      qwen3-a service URL   (default: http://localhost:9113)
-    QWEN3_MODEL    qwen3-a model name    (default: qwen3.8-a)
+    QWEN3_MODEL    qwen3-a model name    (default: qwen3)
 """
 
 import json
@@ -27,7 +27,7 @@ import sys
 import urllib.request
 
 QWEN3_API = os.environ.get("QWEN3_API", "http://localhost:9113")
-QWEN3_MODEL = os.environ.get("QWEN3_MODEL", "qwen3.8-a")
+QWEN3_MODEL = os.environ.get("QWEN3_MODEL", "qwen3")
 
 SYSTEM_PROMPT = """
 You are a text-to-image prompt expander. The user gives a brief image idea;
