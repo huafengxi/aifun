@@ -12,8 +12,6 @@ Usage:
     ./paint.py - --width 1536 --height 864 < prompt.txt
     ./paint.py krea2 "a fox walking in the snow" -o fox.png
     echo "a cat" | ./expand.py | ./paint.py -o cat.png   # LLM prompt expansion
-    ./paint.py serve --port 8097                          # resident server
-    ./paint.py --server http://127.0.0.1:8097 "a cat" -o cat.png  # thin client
 
 Model aliases:
     krea2       Krea 2 Turbo FP8 (sakamakismile/Krea-2-Turbo-FP8) — W8A8
@@ -42,8 +40,7 @@ MODEL_ALIASES = {
 }
 
 # LoRA aliases — load the base pipeline once, then attach the LoRA on top
-# (no second copy of the base is loaded). Local mode only: a `serve`
-# instance holds plain base weights.
+# (no second copy of the base is loaded).
 KREA2_LORAS = {
     "krea2nsfw": {
         "base": "sakamakismile/Krea-2-Turbo-FP8",
@@ -463,8 +460,8 @@ def generate_krea2(
 def load_krea2_pipeline(model_id: str, dual_gpu: bool = False,
                         lora: dict = None) -> dict:
     """Load the Krea 2 pipeline once and return a render context (used by
-    both the one-shot CLI path and `paint.py serve`). Optionally attach a
-    LoRA on top of the loaded base (see KREA2_LORAS)."""
+    the one-shot CLI path and library callers such as mixgen.py).
+    Optionally attach a LoRA on top of the loaded base (see KREA2_LORAS)."""
     import torch  # noqa: F401  (also ensures CUDA init happens here)
     _prepare_krea2_env()
 
@@ -651,175 +648,10 @@ def _render(ctx: dict, prompt: str, width: int, height: int,
 
 
 # ---------------------------------------------------------------------------
-# serve mode — hold the pipeline resident; thin HTTP client via --server
-# ---------------------------------------------------------------------------
-
-DEFAULT_SERVE_PORT = 8097
-
-
-def serve_krea2(host: str, port: int, idle_exit: float = 0,
-                dual_gpu: bool = False):
-    """Load the pipeline once and serve POST /generate (PNG response).
-
-    Single-file, stdlib-only. Requests are serialized (the pipeline is not
-    thread-safe). GET /health reports readiness.
-    """
-    import io
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
-    ctx = load_krea2_pipeline(MODEL_ALIASES["krea2"], dual_gpu=dual_gpu)
-    import torch
-    state = {"last": time.time(), "ready": True}
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, fmt, *args):  # quieter logs
-            print("[serve] " + fmt % args, file=sys.stderr)
-
-        def _send(self, code: int, body: bytes, ctype: str):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _error(self, code: int, msg: str):
-            self._send(code, json.dumps({"error": msg}).encode(),
-                       "application/json")
-
-        def do_GET(self):
-            if self.path == "/health":
-                self._send(200, json.dumps({
-                    "status": "ok", "model": ctx["model_id"],
-                }).encode(), "application/json")
-            else:
-                self._error(404, "not found (try GET /health or POST /generate)")
-
-        def do_POST(self):
-            if self.path != "/generate":
-                return self._error(404, "POST /generate only")
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                req = json.loads(self.rfile.read(length) or b"{}")
-            except (ValueError, json.JSONDecodeError):
-                return self._error(400, "invalid JSON body")
-            prompt = (req.get("prompt") or "").strip()
-            if not prompt:
-                return self._error(400, "missing 'prompt'")
-            if req.get("model") and req["model"] != ctx["model_id"]:
-                return self._error(
-                    400, f"server holds {ctx['model_id']}, not {req['model']}")
-            preset = ctx["preset"]
-            width = int(req.get("width") or preset["width"])
-            height = int(req.get("height") or preset["height"])
-            steps = int(req.get("steps") or preset["steps"])
-            cfg = float(req["cfg"]) if req.get("cfg") is not None else preset["cfg"]
-            seed = req.get("seed")
-            seed = int(seed) if seed is not None else None
-            if int(req.get("n") or 1) != 1:
-                return self._error(400, "serve mode supports n=1 per request")
-            state["last"] = time.time()
-            try:
-                images = _render(ctx, prompt, width, height, steps, cfg, seed)
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
-                return self._error(507, f"OOM at {width}x{height}; retry smaller")
-            buf = io.BytesIO()
-            images[0].save(buf, format="PNG")
-            self._send(200, buf.getvalue(), "image/png")
-
-    server = HTTPServer((host, port), Handler)
-    print(f"[serve] ready on http://{host}:{port} "
-          f"(POST /generate, GET /health)", file=sys.stderr)
-
-    if idle_exit > 0:
-        def _watchdog():
-            while True:
-                time.sleep(5)
-                if time.time() - state["last"] > idle_exit:
-                    print(f"[serve] idle for {idle_exit:.0f}s; shutting down",
-                          file=sys.stderr)
-                    server.shutdown()
-                    return
-        threading.Thread(target=_watchdog, daemon=True).start()
-
-    try:
-        server.serve_forever(poll_interval=1)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-
-
-def client_generate(server_url: str, prompt: str, output: str,
-                    width: int = None, height: int = None, steps: int = None,
-                    cfg: float = None, seed: int = None, model: str = None):
-    """Thin client for `paint.py serve`: POST the request, save the PNG."""
-    import urllib.error
-    import urllib.request
-
-    payload = {"prompt": prompt}
-    for key, val in (("width", width), ("height", height), ("steps", steps),
-                     ("cfg", cfg), ("seed", seed), ("model", model)):
-        if val is not None:
-            payload[key] = val
-    req = urllib.request.Request(
-        server_url.rstrip("/") + "/generate",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            body = resp.read()
-    except urllib.error.HTTPError as e:
-        try:
-            msg = json.loads(e.read()).get("error", str(e))
-        except Exception:
-            msg = str(e)
-        print(f"Error: server rejected the request: {msg}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"Error: cannot reach {server_url} ({e.reason}); start it "
-              f"with `paint.py serve` or drop --server for local mode",
-              file=sys.stderr)
-        sys.exit(1)
-    with open(output, "wb") as f:
-        f.write(body)
-    print(f"Saved to {output} (server round-trip {time.time() - t0:.1f}s)",
-          file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
-    # `paint.py serve` — resident pipeline + HTTP endpoint (own argparse).
-    if len(sys.argv) > 1 and sys.argv[1] == "serve":
-        sp = argparse.ArgumentParser(
-            description="Hold the krea2 pipeline resident and serve "
-                        "POST /generate over HTTP (thin client: paint.py "
-                        "--server URL). Ctrl-C to stop.",
-        )
-        sp.add_argument("--host", default="127.0.0.1",
-                        help="Bind address (default: 127.0.0.1)")
-        sp.add_argument("--port", type=int, default=DEFAULT_SERVE_PORT,
-                        help=f"Bind port (default: {DEFAULT_SERVE_PORT})")
-        sp.add_argument("--idle-exit", type=float, default=0, metavar="SEC",
-                        help="Exit after SEC seconds without requests "
-                             "(default: 0 = run until Ctrl-C)")
-        sp.add_argument("--dual-gpu", action="store_true",
-                        help="Experimental component split across two GPUs "
-                             "(see --dual-gpu in the main CLI). Default: off.")
-        sargs = sp.parse_args(sys.argv[2:])
-        serve_krea2(sargs.host, sargs.port, idle_exit=sargs.idle_exit,
-                    dual_gpu=sargs.dual_gpu)
-        return
-
     # First positional arg can be a model alias.
     if len(sys.argv) > 1 and sys.argv[1] in REMOVED_ALIASES:
         print(
@@ -867,13 +699,6 @@ def main():
         help="Guidance scale (krea2 default: 0.0 — distilled, no CFG)",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
-    parser.add_argument(
-        "--server", default=os.environ.get("PAINT_SERVER"), metavar="URL",
-        help=f"Use a running `paint.py serve` instance (e.g. "
-             f"http://127.0.0.1:{DEFAULT_SERVE_PORT}) instead of loading the "
-             f"model locally; also read from $PAINT_SERVER. Default: local "
-             f"one-shot mode (unchanged).",
-    )
     parser.add_argument("-n", "--num-images", type=int, default=1, help="Number of images (default: 1)")
     parser.add_argument(
         "--dual-gpu", action="store_true",
@@ -898,33 +723,8 @@ def main():
     # Bare invocation → krea2 alias (Turbo FP8).
     if not args.model:
         args.model = MODEL_ALIASES["krea2"]
-
-    # LoRA aliases (e.g. krea2nsfw) run locally only — a serve instance
     # holds the plain base weights.
     lora_cfg = KREA2_LORAS.get(args.model)
-    if lora_cfg and args.server:
-        print(
-            f"Error: LoRA alias '{args.model}' is local-only; the serve "
-            f"instance holds the plain base model", file=sys.stderr,
-        )
-        sys.exit(2)
-
-    # Thin client mode: forward to a running `paint.py serve`.
-    if args.server:
-        if args.num_images != 1:
-            print("Error: --server mode supports -n 1 per request",
-                  file=sys.stderr)
-            sys.exit(1)
-        if args.model in MODEL_ALIASES:
-            args.model = MODEL_ALIASES[args.model]
-        client_generate(
-            args.server, prompt, args.output,
-            width=args.width, height=args.height, steps=args.steps,
-            cfg=args.cfg, seed=args.seed,
-            model=args.model if args.model != MODEL_ALIASES["krea2"] else None,
-        )
-        return
-
 
     if args.model in REMOVED_ALIASES:
         print(

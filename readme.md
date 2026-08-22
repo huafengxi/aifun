@@ -24,15 +24,13 @@ falling back to HuggingFace.
 
 ```bash
 ./paint.py "a cat" -o cat.png                    # bare invocation = krea2 alias
-./paint.py serve --port 8097                     # resident server (see below)
 echo "a cat" | ./expand.py | ./paint.py -o cat.png
 ```
 
 Key operational facts:
 
-- One-shot runs spend ~17 s loading the pipeline each time; keep it
-  resident with `./paint.py serve` (stdlib HTTP, `--idle-exit SEC`,
-  thin client via `--server URL` or `$PAINT_SERVER`). On generation OOM
+- One-shot runs spend ~17 s loading the pipeline each time; for a
+  resident pipeline use the SGLang backend below. On generation OOM
   paint.py halves the resolution and retries — no CPU-offload fallback.
   Defaults (krea2 Turbo): 2048×2048, 8 steps, `--cfg 0.0`.
 - **SGLang backend (faster, supports 2048²)**: `make -C ~/m krea2.start` —
@@ -233,19 +231,3 @@ Some tools are standard-library only (`wximg.py`, `expand.py`,
 `funscript.py`, `imgsave.py` needs PIL only).
 `paint.py` additionally requires `nvidia-modelopt`.
 
-## Model Download
-
-Model downloading is handled by `~/m/maas/maas.py download` (models live in
-`~/m/run/models`; see `~/m/AGENTS.md`). `paint.py` still resolves its own
-pipeline models via ModelScope first, falling back to HuggingFace.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODELSCOPE_CACHE` | — | ModelScope cache directory (used by `paint.py`) |
-| `HUGGINGFACE_HUB_CACHE` | — | HuggingFace cache directory (used by `paint.py`) |
-| `HF_ENDPOINT` | — | HuggingFace mirror, e.g. `https://hf-cdn.sufy.com` when HF is blocked |
-
-Tool-specific environment variables are documented in each tool's section
-above.
