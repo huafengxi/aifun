@@ -3,8 +3,8 @@
 demosaic.py — Video demosaic (mosaic removal) using LADA.
 
 Usage:
-    ./demosaic.py loop <local_mirror_dir>      # Watch local dir, process .mp4 -> .restored.mp4
     ./demosaic.py input.mp4 -o output.mp4      # Process a single video
+    ./demosaic.py demosaic input.mp4           # Same, explicit subcommand
 
 LADA runs locally. Default LADA path: /data/yuanqi.xhf/nano
 """
@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 LADA_HOME = os.environ.get("LADA_HOME", "/data/yuanqi.xhf/nano")
 LADA_PYTHON = os.path.join(LADA_HOME, ".venv", "bin", "python3")
@@ -86,11 +85,11 @@ def run_lada(input_path: str, output_path: str, device: str = "auto", temp_dir: 
 
     LADA writes to a staging file first.  The final ``output_path`` is only
     published after the result is verified to carry both a video and an audio
-    stream, so a half-processed file is never exposed as ``*.restored.mp4``.
+    stream, so a half-processed file is never exposed as the final output.
 
-    The staging file is placed *outside* the watched mirror but keeps a real
-    ``.mp4`` extension: LADA infers the output format from the extension, so a
-    ``*.staging`` name aborts with "Could not determine output format".
+    The staging file keeps a real ``.mp4`` extension: LADA infers the
+    output format from the extension, so a ``*.staging`` name aborts with
+    "Could not determine output format".
     """
     input_abs = os.path.abspath(input_path)
     output_abs = os.path.abspath(output_path)
@@ -105,8 +104,8 @@ def run_lada(input_path: str, output_path: str, device: str = "auto", temp_dir: 
             "lada_tmp",
         )
 
-    # Staging dir is a sibling of ``temp_dir`` so LADA can never tidy it away
-    # mid-run, and it is outside the watched mirror so dav.sync/demosaic ignore it.
+    # Staging dir is a sibling of ``temp_dir`` so LADA can never tidy it
+    # away mid-run.
     staging_dir = temp_dir.rstrip(os.sep) + ".out"
     os.makedirs(staging_dir, exist_ok=True)
     staging = os.path.join(staging_dir, os.path.basename(output_abs))
@@ -179,72 +178,11 @@ def cmd_demosaic(args):
         sys.exit(1)
 
 
-def cmd_loop(args):
-    """Watch a local mirror dir for .mp4 files and produce .restored.mp4."""
-    _check_lada()
-
-    watch_dir = os.path.abspath(args.mirror_dir)
-    interval = args.interval
-    video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm"}
-    # LADA 临时目录放 mirror 的上级（即 ws 的 temp 目录）
-    temp_dir = os.path.join(os.path.dirname(watch_dir) or os.path.expanduser("~"), "demosaic-tmp")
-
-    print(f"Watching: {watch_dir}", file=sys.stderr)
-    print(f"Poll interval: {interval}s", file=sys.stderr)
-
-    while True:
-        try:
-            entries = sorted(Path(watch_dir).iterdir())
-            for entry in entries:
-                if not entry.is_file():
-                    continue
-                ext = entry.suffix.lower()
-                if ext not in video_exts:
-                    continue
-
-                fname = entry.name
-                # 跳过未下载完成的临时文件
-                if fname.endswith(".part"):
-                    continue
-                # Skip our own output so we don't produce *.restored.restored.mp4
-                if fname.endswith(f".restored{ext}"):
-                    continue
-                base = os.path.splitext(fname)[0]
-                output_name = f"{base}.restored.mp4"
-                output_path = os.path.join(watch_dir, output_name)
-
-                if os.path.isfile(output_path):
-                    continue  # already processed
-
-                print(f"Processing: {fname}", file=sys.stderr)
-                success = run_lada(str(entry), output_path, args.device, temp_dir=temp_dir)
-                if success:
-                    print(f"  Done: {output_name}", file=sys.stderr)
-                else:
-                    print(f"  Failed: {fname}", file=sys.stderr)
-
-        except KeyboardInterrupt:
-            print("\nStopping...", file=sys.stderr)
-            break
-        except Exception as e:
-            print(f"Loop error: {e}", file=sys.stderr)
-
-        time.sleep(interval)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Video demosaic (mosaic removal) using LADA."
     )
     sub = parser.add_subparsers(dest="command", help="Commands")
-
-    # loop command
-    p_loop = sub.add_parser("loop", help="Watch local mirror dir and process .mp4 -> .restored.mp4")
-    p_loop.add_argument("mirror_dir", help="Local mirror directory to watch")
-    p_loop.add_argument("--interval", type=int, default=30,
-                        help="Poll interval in seconds (default: 30)")
-    p_loop.add_argument("--device", default="auto",
-                        help="Device: auto, cuda:0, cpu")
 
     # demosaic command (single file)
     p_demo = sub.add_parser("demosaic", help="Process a single video file")
@@ -256,9 +194,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "loop":
-        cmd_loop(args)
-    elif args.command == "demosaic":
+    if args.command == "demosaic":
         cmd_demosaic(args)
     else:
         # Default: if first arg looks like a file, run demosaic

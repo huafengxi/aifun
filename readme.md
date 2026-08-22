@@ -12,7 +12,7 @@ WeChat article image scraping, and assorted utilities.
 | [mixgen.py](#mixgenpy) | Reference-image-conditioned generation (manual img2img) on the local Krea 2 pipeline |
 | [imgsave.py](#imgsavepy) | Save/convert generated images as JPEG (aifun output-format convention, default q90) |
 | [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
-| [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file or watch-loop mode |
+| [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file mode |
 | [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
@@ -161,8 +161,8 @@ and verifies each output carries both video and audio streams before
 publishing it.
 
 ```bash
-./demosaic.py loop <local_mirror_dir>      # watch dir, process videos -> <name>.restored.mp4
 ./demosaic.py input.mp4 -o output.mp4      # single file (bare filename also auto-detected)
+./demosaic.py demosaic input.mp4           # same, explicit subcommand
 ```
 
 ### video-enhance.py
