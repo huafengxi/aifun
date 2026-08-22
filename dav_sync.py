@@ -3,7 +3,7 @@
 dav_sync.py — Sync files between local mirror and remote storage.
 
 Backends (DAV_BACKEND env, default webdav):
-    webdav  — alist WebDAV mount (legacy)
+    webdav  — direct WebDAV (WEBDAV_ENDPOINT_URL; the former alist-mount route was removed)
     pikpak  — direct PikPak API via ../cloud-storage/pikpak.py
 
 Usage:
@@ -74,18 +74,7 @@ def _load_webdav_env():
                     env[m.group(1)] = val
             break
 
-    # Prefer alist WebDAV: all dav_sync ops go through alist (alist 自身打代理)。
-    alist_base = env.get("ALIST_BASE_URL")
-    if alist_base:
-        mount = env.get("ALIST_MOUNT_PATH", "").strip("/")
-        root = "/dav" + (f"/{mount}" if mount else "")
-        return {
-            "hostname": alist_base.rstrip("/"),
-            "username": env.get("ALIST_USERNAME", "admin"),
-            "password": env.get("ALIST_PASSWORD", ""),
-            "root": root,
-        }
-
+    # Direct WebDAV only (the alist-mount route was removed with alist).
     url = env.get("WEBDAV_ENDPOINT_URL") or env.get("WEBDAV_URL")
     if url:
         p = urllib.parse.urlsplit(url)

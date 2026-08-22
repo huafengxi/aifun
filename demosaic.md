@@ -123,6 +123,6 @@ cd ~/m/aifun
 
 - LADA runs via Docker (`ladaapp/lada:latest`) — the image bundles the model weights
 - The loop is designed to run 24/7 as a daemon
-- WebDAV access uses direct credentials (not alist) for file transfers
+- WebDAV access uses direct credentials for file transfers
 - Skips files whose output already exists on WebDAV
 - Network errors are caught per-file; the loop continues
