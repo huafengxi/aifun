@@ -13,7 +13,6 @@ WeChat article image scraping, and assorted utilities.
 | [imgsave.py](#imgsavepy) | Save/convert generated images as JPEG (aifun output-format convention, default q90) |
 | [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
 | [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file mode |
-| [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
 
@@ -126,33 +125,6 @@ generate-timings | ./funscript.py --freq 6.0 --range 80
 | `--attack` | `0.1` | Attack time in seconds |
 | `--release` | `0.15` | Release time in seconds |
 
-### dav_sync.py
-
-Syncs files between a local mirror directory and remote storage.
-Backends (`DAV_BACKEND` env, default `webdav`): `webdav` — direct WebDAV
-(`WEBDAV_ENDPOINT_URL`; credentials with `enc1:` inline encryption are
-decrypted in-memory via `bin/envdec.py`); `pikpak` — direct PikPak API via
-`../cloud-storage/pikpak.py`. Designed around the demosaic pipeline:
-download source videos, upload `*.restored.mp4` results, then tidy up.
-
-```bash
-./dav_sync.py download <remote_dir> <local_mirror>
-./dav_sync.py upload <local_mirror> <remote_dir>
-./dav_sync.py demosaic_clean_remote <remote_dir> <remote_done_dir>
-./dav_sync.py clean_local <local_dir> <remote_dir> <remote_done_dir>
-
-# full loop: download + upload + clean, forever
-./dav_sync.py sync <remote_dir> <local_mirror> <remote_done_dir> [--interval 30] [--skip-upload]
-```
-
-| Command | Description |
-|---------|-------------|
-| `download` | Download files from remote to local mirror |
-| `upload` | Upload `.restored.mp4` files to remote |
-| `demosaic_clean_remote` | Move processed sources from remote to the done dir |
-| `clean_local` | Clean local files once they exist in remote/done |
-| `sync` | Run download/upload/clean in a loop (`--interval`, `--skip-upload`; also honours `DAV_SKIP_UPLOAD=1`) |
-
 ### demosaic.py
 
 Video demosaic (mosaic removal) using **LADA** — see [demosaic.md](demosaic.md)
@@ -186,6 +158,7 @@ Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
 | `--cq` | `22` | Quality target (NVENC `-cq` / x265 `-crf`), lower = better |
 | `--encoder` | `auto` | `auto` / `gpu` (hevc_nvenc) / `cpu` (libx265) |
 | `--force` | off | Overwrite existing output |
+| `--dry-run` | off | Print the ffmpeg command without running it |
 
 Audio is copied unchanged; output gets `hvc1` tag + faststart for compatibility.
 
