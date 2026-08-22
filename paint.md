@@ -7,7 +7,7 @@ repo id directly. Weights are downloaded on first use from ModelScope
 
 Optional prompt expansion lives in a separate filter, **expand.py**: it
 turns a brief idea into a richly detailed plain-text prompt via qwen3-a
-(`make qwen3-a.start`, port 9113) and never blocks generation (passthrough
+(`make qwen3.start`, port 9113) and never blocks generation (passthrough
 if the LLM is down).
 
 ## Usage
