@@ -15,7 +15,6 @@ WeChat article image scraping, and assorted utilities.
 | [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file or watch-loop mode |
 | [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
 | [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
-| [qwen3_bench.py](#qwen3_benchpy) | Single-stream decode perf test for a Qwen3 vLLM server |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
 | [krea2_2gpu_eval.py](#krea2_2gpu_evalpy) | Evaluation harness: does a 2nd GPU help Krea-2-Turbo FP8 inference? |
@@ -168,25 +167,6 @@ publishing it.
 ./demosaic.py input.mp4 -o output.mp4      # single file (bare filename also auto-detected)
 ```
 
-### qwen3_bench.py
-
-Single-stream (one request at a time) decode performance test for any
-OpenAI-compatible vLLM endpoint — e.g. the Qwen3 server managed from `~/m`
-via the maas convention (`make -C ~/m qwen3.start` → `./maas/maas.py serve
-qwen3.8-a`; also `qwen3.stop/.status/.logs/.test`). Reports throughput
-(tok/s) and, by default, time-to-first-token (TTFT) via streaming.
-
-```bash
-make -C ~/m qwen3.bench                              # default: 512 tokens, 3 runs
-make -C ~/m qwen3.bench ARGS="--max-tokens 1024 --runs 5"
-./qwen3_bench.py --no-stream                         # throughput only
-```
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `QWEN3_BENCH_URL` | `http://127.0.0.1:8000` | OpenAI base URL (also `--base-url`) |
-| `QWEN3_BENCH_MODEL` | `qwen3.8` | Model name (also `--model`) |
-
 ### video-enhance.py
 
 Optimizes video quality with an ffmpeg filter pipeline — denoise (`hqdn3d`) →
@@ -291,7 +271,7 @@ pip install -r requirements.txt
 
 Requires Python 3.8+ and PyTorch with CUDA for GPU acceleration.
 Some tools are standard-library only (`wximg.py`, `expand.py`,
-`qwen3_bench.py`, `funscript.py`, `imgsave.py` needs PIL only).
+`funscript.py`, `imgsave.py` needs PIL only).
 `paint.py` additionally requires `nvidia-modelopt` (see paint.md).
 
 ## Model Download
