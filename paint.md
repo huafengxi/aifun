@@ -71,6 +71,33 @@ make paint.status   # curl -s -m 5 http://127.0.0.1:8097/health
 make paint.stop     # graceful SIGTERM via pkill
 ```
 
+## 产物格式约定
+
+生成/保存图像一律用 **JPEG（quality=90）**：w/ 画廊（8080 expo 视图）
+按原图全量加载，PNG 生成产物 3-4 MB/张导致浏览慢；JPEG q90 实测体积
+约为 PNG 的 **1/10**（zhishi-xuebao 1024×1792 图集：10 张 35.7 MB →
+3.3 MB，9.2%），肉眼画质无差。
+
+- **paint.py 直接出 JPEG**：`-o x.jpg` 即可，PIL 按扩展名推格式
+  （`./paint.py krea2 "a red fox" -o fox.jpg` 已实测合法）；
+  `-n >1` 的多图 `base_NN<ext>` 命名同样跟随扩展名。
+- **SGLang b64_json 解码**：`/v1/images/generations` 返回 PNG 编码的
+  b64_json，落盘时用 `aifun/imgsave.py`，不要手写解码存 .png：
+
+  ```bash
+  jq -r .data[0].b64_json resp.json > b64.txt   # 或整段 b64 文本
+  ./imgsave.py b64.txt out.jpg            # 也接受 .png 输入，默认 q90
+  ./imgsave.py out.png out.jpg 95         # 可选 quality
+  ```
+
+- **存量 PNG 目录批量转**：
+
+  ```bash
+  ./imgsave.py --dir <gen-dir> --delete-src
+  # *.png → 同名 .jpg，校验（重开 jpg + 尺寸一致）后才删源，
+  # 并同步把 index.md 中的 .png 文件名重写为 .jpg
+  ```
+
 ## Local models (Krea 2)
 
 | Alias | Model | Notes |
