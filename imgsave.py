@@ -2,7 +2,7 @@
 """imgsave.py — save generated images as JPEG (aifun 产物格式约定).
 
 生成产物一律存 JPEG（quality 默认 90）：w/ 画廊浏览友好，体积约为 PNG 的
-1/10。见 paint.md「产物格式约定」。
+1/10。
 
 单文件模式:
     imgsave.py IN OUT [quality]

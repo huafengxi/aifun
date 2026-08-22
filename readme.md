@@ -7,14 +7,45 @@ WeChat article image scraping, and assorted utilities.
 
 | Tool | Description |
 |------|-------------|
-| [paint.py](paint.md) | Text-to-image with the local Krea 2 diffusers pipeline (Krea 2 Turbo FP8, single-GPU); the faster dual-GPU serving route is Krea 2 via SGLang (`make -C ~/m krea2.start`, see [paint.md](paint.md)); `expand.py` optionally expands brief prompts via qwen3-a |
+| [paint.py](#paintpy) | Text-to-image with the local Krea 2 diffusers pipeline (Krea 2 Turbo FP8, single-GPU); the faster dual-GPU serving route is Krea 2 via SGLang (`make -C ~/m krea2.start`); `expand.py` optionally expands brief prompts via qwen3-a |
 | [expand.py](#expandpy) | Plain-text prompt expansion filter for paint.py via the qwen3-a service |
 | [mixgen.py](#mixgenpy) | Reference-image-conditioned generation (manual img2img) on the local Krea 2 pipeline |
 | [imgsave.py](#imgsavepy) | Save/convert generated images as JPEG (aifun output-format convention, default q90) |
 | [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
-| [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file mode |
+| [demosaic.py](#demosaicpy) | Video demosaic (mosaic removal) using LADA, single-file mode |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
+
+### paint.py
+
+Text-to-image with the local Krea 2 diffusers pipeline (`krea2` = Krea 2
+Turbo FP8, single GPU). Weights download on first use from ModelScope,
+falling back to HuggingFace.
+
+```bash
+./paint.py "a cat" -o cat.png                    # bare invocation = krea2 alias
+./paint.py serve --port 8097                     # resident server (see below)
+echo "a cat" | ./expand.py | ./paint.py -o cat.png
+```
+
+Key operational facts:
+
+- One-shot runs spend ~17 s loading the pipeline each time; keep it
+  resident with `./paint.py serve` (stdlib HTTP, `--idle-exit SEC`,
+  thin client via `--server URL` or `$PAINT_SERVER`). On generation OOM
+  paint.py halves the resolution and retries — no CPU-offload fallback.
+  Defaults (krea2 Turbo): 2048×2048, 8 steps, `--cfg 0.0`.
+- **SGLang backend (faster, supports 2048²)**: `make -C ~/m krea2.start` —
+  SGLang-diffusion Docker, 2×GPU tp2 + online FP8, binds `127.0.0.1:8098`,
+  ready in ~60 s, desired=offline (managed via `maas/maas.py`). Exposes the
+  OpenAI-compatible `POST /v1/images/generations` (`b64_json` → save with
+  `imgsave.py`). 1024² ~4.7 s vs paint.py's ~13.5 s; 2048² (~21 s) fits
+  only on SGLang (paint.py OOMs).
+- **Cache-DiT** (SGLang only): on by default (~1.2× speedup, visually
+  lossless); toggle per request via `enable_cache_dit` in the JSON body, or
+  disable server-side with `KREA2_CACHE_DIT=0 make -C ~/m krea2.start`.
+- Output convention: JPEG q90 (see imgsave.py below).
+- Requires `nvidia-modelopt` + diffusers ≥ 0.39.
 
 ### expand.py
 
@@ -74,14 +105,13 @@ defaults).
 | `--strength` | `0.55` | img2img strength (0–1; fraction of the schedule denoised from noise) |
 | `--seed` | `42` | Random seed |
 | `--quality` | `90` | JPEG quality |
-| `--dual-gpu` | off | Split components across two GPUs (see paint.md) |
+| `--dual-gpu` | off | Split components across two GPUs (transformer on one, text encoder + VAE on the other) |
 | `--model` | `krea2` | Model alias or repo id (base models only) |
 
 ### imgsave.py
 
 Saves generated images as JPEG (the aifun output-format convention:
-quality 90, ~1/10 the size of PNG, gallery-friendly; see paint.md
-「产物格式约定」). Single-file mode accepts either an image file or a
+quality 90, ~1/10 the size of PNG, gallery-friendly). Single-file mode accepts either an image file or a
 base64 text file (the `b64_json` returned by SGLang
 `/v1/images/generations`); batch mode converts every `*.png` in a
 directory.
@@ -127,8 +157,7 @@ generate-timings | ./funscript.py --freq 6.0 --range 80
 
 ### demosaic.py
 
-Video demosaic (mosaic removal) using **LADA** — see [demosaic.md](demosaic.md)
-for details. Runs LADA locally (`LADA_HOME`, default `/data/yuanqi.xhf/nano`)
+Video demosaic (mosaic removal) using **LADA**. Runs LADA locally (`LADA_HOME`, default `/data/yuanqi.xhf/nano`)
 and verifies each output carries both video and audio streams before
 publishing it.
 
@@ -202,7 +231,7 @@ pip install -r requirements.txt
 Requires Python 3.8+ and PyTorch with CUDA for GPU acceleration.
 Some tools are standard-library only (`wximg.py`, `expand.py`,
 `funscript.py`, `imgsave.py` needs PIL only).
-`paint.py` additionally requires `nvidia-modelopt` (see paint.md).
+`paint.py` additionally requires `nvidia-modelopt`.
 
 ## Model Download
 
@@ -219,4 +248,4 @@ pipeline models via ModelScope first, falling back to HuggingFace.
 | `HF_ENDPOINT` | — | HuggingFace mirror, e.g. `https://hf-cdn.sufy.com` when HF is blocked |
 
 Tool-specific environment variables are documented in each tool's section
-above (and in [paint.md](paint.md) for the image-generation stack).
+above.
