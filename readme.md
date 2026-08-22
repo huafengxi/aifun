@@ -181,7 +181,7 @@ Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
 | `-o` | `<input>.enhanced.mp4` | Output file |
 | `--scale` | `1.0` | Upscale factor (e.g. `2` for 2x, lanczos) |
 | `--denoise` | `0.3` | Denoise strength 0.0–1.0 (0 = off) |
-| `--sharpen` | `0.4` | Sharpen amount 0.0–1.0 (0 = off) |
+| `--sharpen` | `0` | Sharpen amount 0.0–1.0 (0 = off, default; `0.4` restores legacy default) |
 | `--cq` | `22` | Quality target (NVENC `-cq` / x265 `-crf`), lower = better |
 | `--encoder` | `auto` | `auto` / `gpu` (hevc_nvenc) / `cpu` (libx265) |
 | `--force` | off | Overwrite existing output |
@@ -196,17 +196,20 @@ Performance notes (benchmarked 2026-08-22 on a 45 s 1080p wmv3 clip,
 RTX 5880 Ada, task 2026-08-22-20-08-07-koi3):
 
 - The bottleneck is the **CPU filter chain**, not decode/encode: the same
-  pipeline with no filters runs ~265 fps (8.8x) vs ~66 fps (2.2x) with the
-  default denoise+sharpen. `-hwaccel cuda` and `hevc_nvenc -preset p1`
+  pipeline with no filters runs ~265 fps (8.8x) vs ~66 fps (2.2x) with
+  denoise+sharpen. `-hwaccel cuda` and `hevc_nvenc -preset p1`
   therefore buy almost nothing (p1 also adds ~22% file size).
-- `cas` sharpening costs ~1/3 of total runtime — `--sharpen 0` is a ~1.5x
-  speedup if sharpening is not wanted.
+- `cas` sharpening costs ~1/3 of total runtime (2.2x → 3.4x, +52% when
+  dropped), so **sharpening is off by default** since 2026-08-22
+  (task 2026-08-22-21-07-22-16e9); use `--sharpen 0.4` to restore it.
+  hqdn3d denoise is kept.
 - VC-1/wmv3 cannot be hardware-decoded on Ada GPUs (`vc1_cuvid` fails with
   `CUDA_ERROR_NOT_SUPPORTED`; `-hwaccel cuda` silently falls back to
   software decode), so GPU decode is only worth considering for
   h264/hevc/av1 sources.
-- One conversion uses ~13 of 64 CPU cores, so running ~2 files in parallel
-  would roughly double total throughput (watcher-side change, not done here).
+- One conversion uses ~13 of 64 CPU cores, so the watcher
+  (`watcher/convert-file.py`) now processes files in parallel with
+  `--workers` (default 2), roughly doubling total throughput.
 
 ### wximg.py
 

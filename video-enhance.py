@@ -14,7 +14,8 @@ Options:
     -o, --output FILE   Output file (default: <input>.enhanced.mp4)
     --scale N           Upscale factor, e.g. 1.5 or 2 (default: 1 = native)
     --denoise F         Denoise strength 0.0-1.0 (default: 0.3, 0 = off)
-    --sharpen F         Sharpen amount 0.0-1.0 (default: 0.4, 0 = off)
+    --sharpen F         Sharpen amount 0.0-1.0 (default: 0 = off; cas costs
+                        ~1/3 of runtime, use --sharpen 0.4 to restore)
     --cq N              Quality target: NVENC -cq / x265 -crf (default: 22)
     --encoder MODE      auto | gpu | cpu (default: auto)
     --force             Overwrite existing output file
@@ -159,8 +160,9 @@ def main():
                     help="upscale factor, e.g. 2 for 2x (default: 1)")
     ap.add_argument("--denoise", type=float, default=0.3,
                     help="denoise strength 0.0-1.0 (default: 0.3)")
-    ap.add_argument("--sharpen", type=float, default=0.4,
-                    help="sharpen amount 0.0-1.0 (default: 0.4)")
+    ap.add_argument("--sharpen", type=float, default=0.0,
+                    help="sharpen amount 0.0-1.0 (default: 0 = off; "
+                         "use 0.4 to restore the legacy default)")
     ap.add_argument("--cq", type=int, default=22,
                     help="quality target: NVENC -cq / x265 -crf, lower = better (default: 22)")
     ap.add_argument("--encoder", choices=["auto", "gpu", "cpu"], default="auto",
