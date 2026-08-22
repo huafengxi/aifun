@@ -192,6 +192,22 @@ else (wma*/wmapro, vorbis, opus, flac, pcm, …) is transcoded to AAC 192k so
 the mp4 muxer never rejects the stream. Output gets `hvc1` tag + faststart
 for compatibility.
 
+Performance notes (benchmarked 2026-08-22 on a 45 s 1080p wmv3 clip,
+RTX 5880 Ada, task 2026-08-22-20-08-07-koi3):
+
+- The bottleneck is the **CPU filter chain**, not decode/encode: the same
+  pipeline with no filters runs ~265 fps (8.8x) vs ~66 fps (2.2x) with the
+  default denoise+sharpen. `-hwaccel cuda` and `hevc_nvenc -preset p1`
+  therefore buy almost nothing (p1 also adds ~22% file size).
+- `cas` sharpening costs ~1/3 of total runtime — `--sharpen 0` is a ~1.5x
+  speedup if sharpening is not wanted.
+- VC-1/wmv3 cannot be hardware-decoded on Ada GPUs (`vc1_cuvid` fails with
+  `CUDA_ERROR_NOT_SUPPORTED`; `-hwaccel cuda` silently falls back to
+  software decode), so GPU decode is only worth considering for
+  h264/hevc/av1 sources.
+- One conversion uses ~13 of 64 CPU cores, so running ~2 files in parallel
+  would roughly double total throughput (watcher-side change, not done here).
+
 ### wximg.py
 
 WeChat (微信公众号) article image scraper — standard library only
