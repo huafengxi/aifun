@@ -187,7 +187,10 @@ Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
 | `--force` | off | Overwrite existing output |
 | `--dry-run` | off | Print the ffmpeg command without running it |
 
-Audio is copied unchanged; output gets `hvc1` tag + faststart for compatibility.
+Audio: MP4-compatible codecs (aac/mp3/ac3/eac3/…) are stream-copied; anything
+else (wma*/wmapro, vorbis, opus, flac, pcm, …) is transcoded to AAC 192k so
+the mp4 muxer never rejects the stream. Output gets `hvc1` tag + faststart
+for compatibility.
 
 ### wximg.py
 

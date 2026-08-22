@@ -63,6 +63,44 @@ def probe(path):
     return info, streams[0]
 
 
+# Audio codecs that can be stream-copied into an MP4 container.
+# Anything else (wma*/wmapro, vorbis, opus, flac, pcm_*, dts, truehd, ...)
+# gets transcoded to AAC.
+MP4_COMPAT_AUDIO = {"aac", "mp3", "mp2", "ac3", "eac3", "alac"}
+AAC_BITRATE = "192k"
+
+
+def probe_audio_streams(path):
+    """Return list of audio streams (index, codec_name) via ffprobe."""
+    rc, out, err = run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=index,codec_name",
+        "-of", "json", path,
+    ])
+    if rc != 0:
+        die(f"ffprobe (audio) failed on {path}: {err.strip()}")
+    return json.loads(out).get("streams") or []
+
+
+def audio_plan(path):
+    """Decide per-audio-stream handling for the MP4 output.
+
+    Returns (opts, summary) where opts is the ffmpeg option list and
+    summary is a printable list like ['a:0 aac -> copy', 'a:1 wmapro -> aac 192k'].
+    """
+    opts, summary = [], []
+    for n, st in enumerate(probe_audio_streams(path)):
+        codec = (st.get("codec_name") or "unknown").lower()
+        if codec in MP4_COMPAT_AUDIO:
+            opts += [f"-c:a:{n}", "copy"]
+            summary.append(f"a:{n} {codec} -> copy")
+        else:
+            opts += [f"-c:a:{n}", "aac", f"-b:a:{n}", AAC_BITRATE]
+            summary.append(f"a:{n} {codec} -> aac {AAC_BITRATE} (not mp4-compatible)")
+    return opts, summary
+
+
 def nvenc_available():
     """Quick check that hevc_nvenc actually works on this GPU."""
     rc, _, err = run([
@@ -94,7 +132,7 @@ def build_filters(args):
     return vf
 
 
-def build_cmd(args, vf, encoder):
+def build_cmd(args, vf, encoder, audio_opts):
     """Assemble the full ffmpeg command."""
     cmd = ["ffmpeg", "-hide_banner", "-y" if args.force else "-n", "-i", args.input]
     if vf:
@@ -105,7 +143,7 @@ def build_cmd(args, vf, encoder):
     else:
         cmd += ["-c:v", "libx265", "-crf", str(args.cq), "-preset", "medium"]
     cmd += ["-tag:v", "hvc1",        # Apple/QuickTime compatibility
-            "-c:a", "copy",          # keep audio as-is
+            *audio_opts,             # copy mp4-compatible audio, else transcode to AAC
             "-map_metadata", "0",
             "-movflags", "+faststart",
             args.output]
@@ -166,7 +204,10 @@ def main():
     if vf:
         print(f"filters: {' -> '.join(vf)}")
 
-    cmd = build_cmd(args, vf, encoder)
+    audio_opts, audio_summary = audio_plan(args.input)
+    print(f"audio : {', '.join(audio_summary) if audio_summary else 'no audio stream'}")
+
+    cmd = build_cmd(args, vf, encoder, audio_opts)
     if args.dry_run:
         print("cmd   :", " ".join(cmd))
         return
@@ -180,7 +221,7 @@ def main():
             print("note: GPU encode failed, retrying with libx265 (CPU)...", file=sys.stderr)
             if os.path.exists(args.output):
                 os.remove(args.output)  # drop partial output from the GPU attempt
-            cmd = build_cmd(args, vf, "cpu")
+            cmd = build_cmd(args, vf, "cpu", audio_opts)
             p = subprocess.run(cmd, stderr=None)
         if p.returncode != 0:
             sys.exit(p.returncode)
