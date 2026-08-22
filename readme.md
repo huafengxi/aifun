@@ -1,51 +1,180 @@
 # aifun
 
-AI tools for fun — Japanese ASMR voice analysis, funscript generation, and AI image generation.
+AI tools for fun — Krea 2 image generation, video demosaic & enhancement,
+WeChat article image scraping, and assorted utilities.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| [siko.py](siko.md) | Detect 西口 (siko) instructions in Japanese ASMR audio using Qwen3-ASR-1.7B with forced alignment timestamps |
-| [paint.py](paint.md) | Generate images from text prompts with local Krea 2 (FP8 transformer + FP8 Qwen3-VL text encoder) diffusers pipeline; `expand.py` optionally expands brief prompts via qwen3-a |
-| [funscript.py](#funscriptpy) | Convert siko timestamps into funscript format for interactive toys |
+| [paint.py](paint.md) | Text-to-image with the local Krea 2 diffusers pipeline (Krea 2 Turbo FP8, single-GPU); the faster dual-GPU serving route is Krea 2 via SGLang (`make -C ~/m krea2.start`, see [paint.md](paint.md)); `expand.py` optionally expands brief prompts via qwen3-a |
+| [expand.py](#expandpy) | Plain-text prompt expansion filter for paint.py via the qwen3-a service |
+| [mixgen.py](#mixgenpy) | Reference-image-conditioned generation (manual img2img) on the local Krea 2 pipeline |
+| [imgsave.py](#imgsavepy) | Save/convert generated images as JPEG (aifun output-format convention, default q90) |
+| [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
+| [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file or watch-loop mode |
+| [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
 | [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
-| [qwen3_serve.py](#qwen3_servepy) | Serve a Qwen3 LLM with vLLM (OpenAI API) in Docker |
-| [qwen3_bench.py](#qwen3_benchpy) | Single-stream decode perf test for the qwen3 server |
+| [qwen3_bench.py](#qwen3_benchpy) | Single-stream decode perf test for a Qwen3 vLLM server |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
+| [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
+| [krea2_2gpu_eval.py](#krea2_2gpu_evalpy) | Evaluation harness: does a 2nd GPU help Krea-2-Turbo FP8 inference? |
 
-### qwen3_serve.py
+### expand.py
 
-Serves a Qwen3 LLM as an OpenAI-compatible API using vLLM in Docker.
-Models are downloaded from ModelScope (preferred) into `~/m/run/models` first.
+Pipeline filter that turns a brief prompt sketch into a richly detailed
+plain-text scene description via the qwen3-a chat service (no JSON —
+Krea 2 takes plain text). Reads the prompt from argv or stdin, writes the
+expanded text to stdout (diagnostics on stderr). If the qwen3-a service is
+unreachable, the original prompt is passed through unchanged so generation
+is never blocked.
 
 ```bash
-make -C ~/m qwen3.start      # download (if needed) + start vLLM on :8000
-make -C ~/m qwen3.status     # container + API health
-make -C ~/m qwen3.stop       # stop/remove the container
-make -C ~/m qwen3.logs       # tail container logs
-
-# override the model (default: Qwen/Qwen3.8-27B-FP8)
-make -C ~/m qwen3.start QWEN3_MODEL=Qwen/Qwen3.8-27B-FP8
+./expand.py "a cat"
+echo "cyberpunk city at night" | ./expand.py
+echo "a cat" | ./expand.py | ./paint.py -o cat.png
 ```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QWEN3_MODEL` | `Qwen/Qwen3.8-27B-FP8` | Model ID on ModelScope |
-| `QWEN3_PORT` | `8000` | Host port for the OpenAI API |
-| `QWEN3_MODELS_DIR` | `/data/yuanqi.xhf/models` | Local model directory |
-| `QWEN3_IMAGE` | `mass-runner:cuda13.0-vllm0.22.1` | vLLM image (must support Qwen3.5 arch) |
-| `QWEN3_TP` | `2` | Tensor-parallel size (27B uses both GPUs) |
-| `QWEN3_MAX_MODEL_LEN` | `32768` | Max context length |
-| `QWEN3_SPECULATIVE` | `{"method":"qwen3_5_mtp","num_speculative_tokens":1}` | MTP speculative decoding (speeds up single-stream decode; set empty to disable) |
-| `QWEN3_TOOL_CALL_PARSER` | `qwen3_xml` | Tool call parser (enables `tool_choice: auto` / native function calling; set empty to disable) |
-| `QWEN3_REASONING_PARSER` | `qwen3` | Reasoning parser (splits ` thinking`/` response` into `reasoning_content` vs `content`; set empty to disable) |
+| `QWEN3_API` | `http://localhost:9113` | qwen3-a service URL |
+| `QWEN3_MODEL` | `qwen3` | qwen3-a model name |
+
+The qwen3-a server is managed from `~/m` via the maas convention
+(`make -C ~/m qwen3.start` → `./maas/maas.py serve qwen3.8-a`).
+
+### mixgen.py
+
+Reference-image-conditioned generation (manual img2img) on the local Krea 2
+diffusers pipeline. Krea-2 is T2I-only, so this implements the
+community-standard manual img2img trick: VAE-encode the reference image,
+normalize with the VAE's latents mean/std, mix with noise at the strength
+ratio, then run the pipeline with a truncated sigma schedule. The pipeline
+context is borrowed from `paint.load_krea2_pipeline` (dual-GPU aware);
+LoRA aliases are not supported.
+
+```bash
+# Single shot: needs PROMPT, --ref and -o
+./mixgen.py --ref ref.jpg --strength 0.55 --seed 42 \
+    --width 1024 --height 1792 -o out.jpg "a prompt"
+
+# Batch: JSON spec, loads the model once and renders all jobs
+./mixgen.py --spec jobs.json
+```
+
+`--spec` JSON format: list of `{name, ref, prompt, seed, strength
+[, out, width, height, steps]}` (per-job fields fall back to the CLI
+defaults).
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `prompt` | *(required in single-shot)* | Text prompt |
+| `--ref` | *(required in single-shot)* | Reference image |
+| `-o`, `--output` | *(required in single-shot)* | Output file |
+| `--spec` | — | JSON batch spec (mutually exclusive with single-shot args) |
+| `--width` | `1024` | Output width |
+| `--height` | `1792` | Output height |
+| `--steps` | `8` | Inference steps |
+| `--strength` | `0.55` | img2img strength (0–1; fraction of the schedule denoised from noise) |
+| `--seed` | `42` | Random seed |
+| `--quality` | `90` | JPEG quality |
+| `--dual-gpu` | off | Split components across two GPUs (see paint.md) |
+| `--model` | `krea2` | Model alias or repo id (base models only) |
+
+### imgsave.py
+
+Saves generated images as JPEG (the aifun output-format convention:
+quality 90, ~1/10 the size of PNG, gallery-friendly; see paint.md
+「产物格式约定」). Single-file mode accepts either an image file or a
+base64 text file (the `b64_json` returned by SGLang
+`/v1/images/generations`); batch mode converts every `*.png` in a
+directory.
+
+```bash
+./imgsave.py out.png out.jpg
+jq -r .data[0].b64_json resp.json > b64.txt && ./imgsave.py b64.txt out.jpg 95
+./imgsave.py --dir ~/m/run/temp/some-gen --delete-src
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `IN OUT [quality]` | — | Single-file mode: image or base64 text → output file (format by extension) |
+| `--dir DIR` | — | Batch mode: convert every `*.png` in DIR to same-name `.jpg` |
+| `--quality` | `90` | JPEG quality |
+| `--delete-src` | off | Batch mode: delete source PNGs after converting & verifying, and rewrite `index.md` references |
+
+Stdlib + PIL only.
+
+### funscript.py
+
+Converts timing lines read from **stdin** into funscript format for
+interactive toys. Input format: whitespace-separated lines
+`start_seconds duration_seconds` (blank lines and `#` comments ignored) —
+any tool that emits such TSV timings can be piped in.
+
+```bash
+# Pipe timing TSV (start_ts <TAB> duration) into the generator
+generate-timings | ./funscript.py -o output.funscript
+
+# With custom parameters
+generate-timings | ./funscript.py --freq 6.0 --range 80
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-o` | `output.funscript` | Output file |
+| `--freq` | `5.0` | Oscillation frequency (Hz) |
+| `--range` | `80` | Amplitude range 0-100 |
+| `--fps` | `60` | Frames per second |
+| `--attack` | `0.1` | Attack time in seconds |
+| `--release` | `0.15` | Release time in seconds |
+
+### dav_sync.py
+
+Syncs files between a local mirror directory and remote storage.
+Backends (`DAV_BACKEND` env, default `webdav`): `webdav` — direct WebDAV
+(`WEBDAV_ENDPOINT_URL`; credentials with `enc1:` inline encryption are
+decrypted in-memory via `bin/envdec.py`); `pikpak` — direct PikPak API via
+`../cloud-storage/pikpak.py`. Designed around the demosaic pipeline:
+download source videos, upload `*.restored.mp4` results, then tidy up.
+
+```bash
+./dav_sync.py download <remote_dir> <local_mirror>
+./dav_sync.py upload <local_mirror> <remote_dir>
+./dav_sync.py demosaic_clean_remote <remote_dir> <remote_done_dir>
+./dav_sync.py clean_local <local_dir> <remote_dir> <remote_done_dir>
+
+# full loop: download + upload + clean, forever
+./dav_sync.py sync <remote_dir> <local_mirror> <remote_done_dir> [--interval 30] [--skip-upload]
+```
+
+| Command | Description |
+|---------|-------------|
+| `download` | Download files from remote to local mirror |
+| `upload` | Upload `.restored.mp4` files to remote |
+| `demosaic_clean_remote` | Move processed sources from remote to the done dir |
+| `clean_local` | Clean local files once they exist in remote/done |
+| `sync` | Run download/upload/clean in a loop (`--interval`, `--skip-upload`; also honours `DAV_SKIP_UPLOAD=1`) |
+
+### demosaic.py
+
+Video demosaic (mosaic removal) using **LADA** — see [demosaic.md](demosaic.md)
+for details. Runs LADA locally (`LADA_HOME`, default `/data/yuanqi.xhf/nano`)
+and verifies each output carries both video and audio streams before
+publishing it.
+
+```bash
+./demosaic.py loop <local_mirror_dir>      # watch dir, process videos -> <name>.restored.mp4
+./demosaic.py input.mp4 -o output.mp4      # single file (bare filename also auto-detected)
+```
 
 ### qwen3_bench.py
 
-Single-stream (one request at a time) decode performance test for the server
-started by `qwen3_serve.py`. Reports throughput (tok/s) and, by default,
-time-to-first-token (TTFT) via streaming.
+Single-stream (one request at a time) decode performance test for any
+OpenAI-compatible vLLM endpoint — e.g. the Qwen3 server managed from `~/m`
+via the maas convention (`make -C ~/m qwen3.start` → `./maas/maas.py serve
+qwen3.8-a`; also `qwen3.stop/.status/.logs/.test`). Reports throughput
+(tok/s) and, by default, time-to-first-token (TTFT) via streaming.
 
 ```bash
 make -C ~/m qwen3.bench                              # default: 512 tokens, 3 runs
@@ -55,8 +184,8 @@ make -C ~/m qwen3.bench ARGS="--max-tokens 1024 --runs 5"
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QWEN3_BENCH_URL` | `http://127.0.0.1:8000` | OpenAI base URL |
-| `QWEN3_BENCH_MODEL` | `qwen3` | Model name |
+| `QWEN3_BENCH_URL` | `http://127.0.0.1:8000` | OpenAI base URL (also `--base-url`) |
+| `QWEN3_BENCH_MODEL` | `qwen3.8` | Model name (also `--model`) |
 
 ### video-enhance.py
 
@@ -82,41 +211,77 @@ Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
 
 Audio is copied unchanged; output gets `hvc1` tag + faststart for compatibility.
 
-### funscript.py
+### wximg.py
 
-Converts siko timestamps into funscript format for interactive toys.
+WeChat (微信公众号) article image scraper — standard library only
+(urllib/re/json/hashlib/threading). Handles both image-carousel articles
+(`picture_page_info_list` JS variable) and regular illustrated articles
+(`<img data-src>` from `mmbiz.qpic.cn`); downloads concurrently with a
+mp.weixin.qq.com Referer, verifies file magic bytes, and records
+title/author/publish-time/tags/cover metadata.
 
 ```bash
-# Pipe siko output to funscript generator
-./siko.py a.mp3 | ./funscript.py -o output.funscript
+./wximg.py https://mp.weixin.qq.com/s/XXXX -o ./wximg-out/
+./wximg.py --list urls.txt -o ./wximg-out/
+```
 
-# With custom parameters
-./siko.py a.mp3 | ./funscript.py --freq 6.0 --range 80
+Output layout: `OUT_DIR/<title-slug>-<urlhash6>/` with sequential
+`01.<ext>` images, an optional `cover.<ext>` and `meta.json`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `URL [URL...]` | — | Article links (positional, multiple allowed) |
+| `--list FILE` | — | Batch file, one URL per line (`#` comments allowed) |
+| `-o`, `--out` | `./wximg-out/` | Output directory |
+| `--workers` | `8` | Download concurrency (capped at 8) |
+| `--min-delay` | `0.5` | Min seconds between articles |
+| `--max-delay` | `1.0` | Max seconds between articles |
+
+Known limits: account-level article lists are not publicly obtainable
+(feed it article links); video-only articles have no images; scraping too
+fast triggers WeChat's 「当前环境异常」 verification page — lower the
+rate if that happens.
+
+### krea2_2gpu_eval.py
+
+Evaluation harness for the question "does a 2nd GPU help Krea-2-Turbo FP8
+inference?". Loads the same FP8 pipeline as paint.py in one of three
+placement modes, generates a fixed prompt (seed 42), and prints load time /
+gen time / per-GPU peak memory as `RESULT_JSON {...}` on the last line.
+
+```bash
+./krea2_2gpu_eval.py --mode single                     # whole pipeline on one GPU (paint.py path)
+./krea2_2gpu_eval.py --mode devmap                     # device_map="balanced" across both GPUs
+./krea2_2gpu_eval.py --mode manual --width 1024 --height 1024 --steps 8
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-o` | `output.funscript` | Output file |
-| `--freq` | `5.0` | Oscillation frequency (Hz) |
-| `--range` | `80` | Amplitude range 0-100 |
-| `--fps` | `60` | Frames per second |
-| `--attack` | `0.1` | Attack time in seconds |
-| `--release` | `0.15` | Release time in seconds |
+| `--mode` | *(required)* | `single` / `devmap` / `manual` (transformer@GPU0, text encoder + VAE@GPU1) |
+| `--width` | `1024` | Image width |
+| `--height` | `1024` | Image height |
+| `--steps` | `8` | Inference steps |
+| `--out` | `/tmp/krea2_2gpu_eval.png` | Output file |
 
 ### download_model.py
 
 Downloads models from **ModelScope** (preferred for China) or HuggingFace.
 
 ```bash
-# Download from ModelScope (default)
+# Auto: try ModelScope first, fall back to HuggingFace (default)
 python3 download_model.py Qwen/Qwen3-ASR-1.7B
 
-# Download from HuggingFace
+# Explicit source
+python3 download_model.py --source modelscope Qwen/Qwen3-ASR-1.7B --cache-dir /model-cache
 python3 download_model.py --source huggingface Qwen/Qwen3-ASR-1.7B
-
-# Auto: try ModelScope first, fallback to HuggingFace
-python3 download_model.py --source auto Qwen/Qwen3-ASR-1.7B
 ```
+
+Prints the resolved local path to stdout.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--source` | `auto` | `modelscope`, `huggingface`, or `auto` (ModelScope first, HF fallback) |
+| `--cache-dir` | `$MODELSCOPE_CACHE` or `$HUGGINGFACE_HUB_CACHE` | Model cache directory |
 
 ## Setup
 
@@ -125,30 +290,24 @@ pip install -r requirements.txt
 ```
 
 Requires Python 3.8+ and PyTorch with CUDA for GPU acceleration.
+Some tools are standard-library only (`wximg.py`, `expand.py`,
+`qwen3_bench.py`, `funscript.py`, `imgsave.py` needs PIL only).
+`paint.py` additionally requires `nvidia-modelopt` (see paint.md).
 
 ## Model Download
 
-Models are downloaded from **ModelScope** by default (preferred for better accessibility in China).
-Set `MODEL_DOWNLOAD_SOURCE=huggingface` to use HuggingFace instead.
+Models are downloaded from **ModelScope** by default (preferred for better
+accessibility in China), falling back to HuggingFace. See `download_model.py`
+above and `~/m/AGENTS.md` (models live in `~/m/run/models`; `maas/maas.py`
+handles download + serve for vLLM/SGLang services).
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_DOWNLOAD_SOURCE` | `auto` | Model source: `modelscope`, `huggingface`, or `auto` |
-| `MODELSCOPE_CACHE` | `/model-cache` | ModelScope cache directory |
-| `HUGGINGFACE_HUB_CACHE` | `/model-cache` | HuggingFace cache directory |
-| `QWEN_ASR_MODEL` | `Qwen/Qwen3-ASR-1.7B` | Qwen3-ASR model name |
-| `QWEN_ALIGNER_MODEL` | `Qwen/Qwen3-ForcedAligner-0.6B` | Forced aligner model |
-| `QWEN_DEVICE` | `auto` | Device: `cuda` or `cpu` |
-| `QWEN_DTYPE` | `bfloat16` | Compute dtype |
-| `QWEN_USE_ALIGNER` | `true` | Enable forced aligner |
+| `MODELSCOPE_CACHE` | — | ModelScope cache directory (used by `download_model.py`) |
+| `HUGGINGFACE_HUB_CACHE` | — | HuggingFace cache directory (used by `download_model.py`) |
+| `HF_ENDPOINT` | — | HuggingFace mirror, e.g. `https://hf-cdn.sufy.com` when HF is blocked |
 
-## How it works
-
-1. `siko.py` loads a **Qwen3-ASR-1.7B** model and transcribes the audio
-2. Uses **Qwen3-ForcedAligner-0.6B** for word-level timestamp alignment
-3. Detects siko-related patterns (しこ, シコ, 西口, siko, shico, etc.)
-4. Outputs timestamps with duration for each detected instruction
-5. `funscript.py` generates oscillating position patterns from the timestamps
-6. Models are downloaded from **ModelScope** by default (preferred for China)
+Tool-specific environment variables are documented in each tool's section
+above (and in [paint.md](paint.md) for the image-generation stack).
