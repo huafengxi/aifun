@@ -53,22 +53,17 @@ Same single file, stdlib HTTP only, no new dependencies; requests are
 serialized; outputs are bit-identical to one-shot mode for the same seed.
 Default behavior (no `serve`, no `--server`) is unchanged.
 
-#### Service management (make)
+#### Service management
 
-The resident server is managed like every other workspace service —
-`make paint.start` / `paint.stop` / `paint.status` (registered in
-`env/services.yml`). It binds `127.0.0.1:8097` **without `--idle-exit`**
-(stays resident), logs to `logs/paint-serve.log`, and `paint.status`
-probes `GET /health` (exit 0 = online).
-
-Because the pipeline holds ~20.5 GB VRAM alongside the vLLM workers, the
-desired state is **offline**: `svc.sync` will not auto-revive it. Bring it
-up on demand:
+> **Note (2026-08):** the `make paint.start/.stop/.status` targets and the
+> `paint` entry in `env/services.yml` were removed — the diffusers resident
+> server (8097) has been superseded by the SGLang backend (`make krea2.start`,
+> :8098). To run a resident diffusers server manually:
 
 ```bash
-make paint.start    # start when needed (load takes ~17 s)
-make paint.status   # curl -s -m 5 http://127.0.0.1:8097/health
-make paint.stop     # graceful SIGTERM via pkill
+nohup ./paint.py serve --host 127.0.0.1 --port 8097 >> ../logs/paint-serve.log 2>&1 &
+curl -s -m 5 http://127.0.0.1:8097/health   # probe
+pkill -f '[p]aint.py serve'                  # stop
 ```
 
 ## 产物格式约定
