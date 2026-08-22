@@ -126,14 +126,17 @@ full evaluation.
 
 A separate, Docker-based serving route for Krea-2 using SGLang-diffusion
 (native pipeline, `--tp-size 2` + online `--quantization fp8`). Managed by
-`make krea2.start` / `krea2.stop` / `krea2.status` (registered in
+`make krea2.start` / `krea2.stop` / `krea2.status` — thin delegations to
+`./maas/maas.py serve/stop/status krea2` (runner `sglang-diffusion`, config
+`maas/krea2/config.json`; registered in
 `~/m/env/services.yml`, desired **offline**, binds `127.0.0.1:8098`).
 paint.py stays the diffusers single-GPU fallback and is not involved.
 
 ```bash
-make krea2.start    # docker run; ready in ~60s (docker logs -f krea2-sglang)
-make krea2.status   # probes GET /health
-make krea2.stop     # docker rm -f (releases both GPUs)
+make krea2.start    # maas.py docker run; ready in ~60s (docker logs -f maas-krea2)
+make krea2.status   # maas.py status; exit 0 iff /health HTTP 200
+make krea2.stop     # maas.py docker rm -f (releases both GPUs)
+# direct invocation (same semantics): ./maas/maas.py serve krea2
 
 # OpenAI-compatible images API (seed/size/steps are request-time)
 curl -s -X POST http://127.0.0.1:8098/v1/images/generations \
