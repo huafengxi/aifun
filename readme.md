@@ -14,7 +14,6 @@ WeChat article image scraping, and assorted utilities.
 | [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
 | [demosaic.py](demosaic.md) | Video demosaic (mosaic removal) using LADA, single-file or watch-loop mode |
 | [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
-| [download_model.py](#download_modelpy) | Download models from ModelScope (preferred for China) or HuggingFace |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
 | [krea2_2gpu_eval.py](#krea2_2gpu_evalpy) | Evaluation harness: does a 2nd GPU help Krea-2-Turbo FP8 inference? |
@@ -243,26 +242,6 @@ gen time / per-GPU peak memory as `RESULT_JSON {...}` on the last line.
 | `--steps` | `8` | Inference steps |
 | `--out` | `/tmp/krea2_2gpu_eval.png` | Output file |
 
-### download_model.py
-
-Downloads models from **ModelScope** (preferred for China) or HuggingFace.
-
-```bash
-# Auto: try ModelScope first, fall back to HuggingFace (default)
-python3 download_model.py Qwen/Qwen3-ASR-1.7B
-
-# Explicit source
-python3 download_model.py --source modelscope Qwen/Qwen3-ASR-1.7B --cache-dir /model-cache
-python3 download_model.py --source huggingface Qwen/Qwen3-ASR-1.7B
-```
-
-Prints the resolved local path to stdout.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--source` | `auto` | `modelscope`, `huggingface`, or `auto` (ModelScope first, HF fallback) |
-| `--cache-dir` | `$MODELSCOPE_CACHE` or `$HUGGINGFACE_HUB_CACHE` | Model cache directory |
-
 ## Setup
 
 ```bash
@@ -276,17 +255,16 @@ Some tools are standard-library only (`wximg.py`, `expand.py`,
 
 ## Model Download
 
-Models are downloaded from **ModelScope** by default (preferred for better
-accessibility in China), falling back to HuggingFace. See `download_model.py`
-above and `~/m/AGENTS.md` (models live in `~/m/run/models`; `maas/maas.py`
-handles download + serve for vLLM/SGLang services).
+Model downloading is handled by `~/m/maas/maas.py download` (models live in
+`~/m/run/models`; see `~/m/AGENTS.md`). `paint.py` still resolves its own
+pipeline models via ModelScope first, falling back to HuggingFace.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODELSCOPE_CACHE` | — | ModelScope cache directory (used by `download_model.py`) |
-| `HUGGINGFACE_HUB_CACHE` | — | HuggingFace cache directory (used by `download_model.py`) |
+| `MODELSCOPE_CACHE` | — | ModelScope cache directory (used by `paint.py`) |
+| `HUGGINGFACE_HUB_CACHE` | — | HuggingFace cache directory (used by `paint.py`) |
 | `HF_ENDPOINT` | — | HuggingFace mirror, e.g. `https://hf-cdn.sufy.com` when HF is blocked |
 
 Tool-specific environment variables are documented in each tool's section

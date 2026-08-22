@@ -247,16 +247,6 @@ def resolve_model_path(model_id: str, cache_dir: str = None) -> str:
             kwargs["ignore_patterns"] = KREA_IGNORE_PATTERNS
         print(f"Downloading {model_id} from HuggingFace...", file=sys.stderr)
         return hf_snapshot_download(model_id, **kwargs)
-    except ImportError:
-        print("huggingface_hub not installed; trying download_model...",
-              file=sys.stderr)
-    except Exception as e:
-        print(f"HuggingFace download failed ({e}); trying download_model...",
-              file=sys.stderr)
-
-    try:
-        from download_model import download_from_huggingface
-        return download_from_huggingface(model_id, cache_dir)
     except Exception as e:
         print(f"Error: could not download {model_id}: {e}", file=sys.stderr)
         sys.exit(1)
