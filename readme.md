@@ -16,7 +16,6 @@ WeChat article image scraping, and assorted utilities.
 | [dav_sync.py](#dav_syncpy) | Sync files between a local mirror and remote storage (WebDAV or PikPak) |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
-| [krea2_2gpu_eval.py](#krea2_2gpu_evalpy) | Evaluation harness: does a 2nd GPU help Krea-2-Turbo FP8 inference? |
 
 ### expand.py
 
@@ -220,27 +219,6 @@ Known limits: account-level article lists are not publicly obtainable
 (feed it article links); video-only articles have no images; scraping too
 fast triggers WeChat's 「当前环境异常」 verification page — lower the
 rate if that happens.
-
-### krea2_2gpu_eval.py
-
-Evaluation harness for the question "does a 2nd GPU help Krea-2-Turbo FP8
-inference?". Loads the same FP8 pipeline as paint.py in one of three
-placement modes, generates a fixed prompt (seed 42), and prints load time /
-gen time / per-GPU peak memory as `RESULT_JSON {...}` on the last line.
-
-```bash
-./krea2_2gpu_eval.py --mode single                     # whole pipeline on one GPU (paint.py path)
-./krea2_2gpu_eval.py --mode devmap                     # device_map="balanced" across both GPUs
-./krea2_2gpu_eval.py --mode manual --width 1024 --height 1024 --steps 8
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--mode` | *(required)* | `single` / `devmap` / `manual` (transformer@GPU0, text encoder + VAE@GPU1) |
-| `--width` | `1024` | Image width |
-| `--height` | `1024` | Image height |
-| `--steps` | `8` | Inference steps |
-| `--out` | `/tmp/krea2_2gpu_eval.png` | Output file |
 
 ## Setup
 
