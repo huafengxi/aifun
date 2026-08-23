@@ -12,7 +12,7 @@ WeChat article image scraping, and assorted utilities.
 | [mixgen.py](#mixgenpy) | Reference-image-conditioned generation (manual img2img) on the local Krea 2 pipeline |
 | [imgsave.py](#imgsavepy) | Save/convert generated images as JPEG (aifun output-format convention, default q90) |
 | [funscript.py](#funscriptpy) | Convert timing lines (TSV on stdin) into funscript format for interactive toys |
-| [demosaic.py](#demosaicpy) | Video demosaic (mosaic removal) using LADA, single-file mode |
+| [demosaic.py](#demosaicpy) | Video demosaic (mosaic removal) using Jasna, single-file mode |
 | [video-enhance.py](#video-enhancepy) | Optimize video quality (denoise/sharpen/upscale) and re-encode to H.265 |
 | [wximg.py](#wximgpy) | WeChat article image scraper (standard library only) |
 
@@ -155,14 +155,26 @@ generate-timings | ./funscript.py --freq 6.0 --range 80
 
 ### demosaic.py
 
-Video demosaic (mosaic removal) using **LADA**. Runs LADA locally (`LADA_HOME`, default `/data/yuanqi.xhf/nano`)
-and verifies each output carries both video and audio streams before
-publishing it.
+Video demosaic (mosaic removal) using **[Jasna](https://github.com/Kruk2/jasna)**
+(v0.10.0, GPU-only TensorRT pipeline; `rfdetr-v6` detection +
+`mosaic_restoration_1.2` BasicVSR++ restoration). Runs the local Jasna install
+(`JASNA_HOME`, default `/data/yuanqi.xhf/jasna`) and verifies each output
+carries video (and audio when the input has audio) before publishing it.
 
 ```bash
 ./demosaic.py input.mp4 -o output.mp4      # single file (bare filename also auto-detected)
 ./demosaic.py demosaic input.mp4           # same, explicit subcommand
+./demosaic.py input.mp4 --device cuda:1    # pick GPU (default cuda:0)
 ```
+
+Notes:
+
+- First run on a new GPU compiles TensorRT engines (one-time, ~15–60 min,
+  cached in `$JASNA_HOME/model_weights`).
+- Output is HEVC (NVENC) by default; the container follows the output
+  extension (`.mp4`/`.mkv`).
+- VRAM: ~5–11 GB for 1080p–4K with default clip size; lower
+  `--max-clip-size` via the Jasna CLI directly if VRAM runs out.
 
 ### video-enhance.py
 
