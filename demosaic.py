@@ -82,7 +82,13 @@ def _verify_output(staging, input_path):
     return True
 
 
-def run_jasna(input_path: str, output_path: str, device: str = "auto"):
+def run_jasna(
+    input_path: str,
+    output_path: str,
+    device: str = "auto",
+    detection_model: str | None = None,
+    detection_score_threshold: str | None = None,
+):
     """Run Jasna locally to demosaic a video.
 
     Jasna writes to a staging file first. The final ``output_path`` is only
@@ -107,6 +113,10 @@ def run_jasna(input_path: str, output_path: str, device: str = "auto"):
     cmd = [JASNA_BIN, "--input", input_abs, "--output", staging, "--no-progress"]
     if device not in ("auto", ""):
         cmd += ["--device", device]
+    if detection_model:
+        cmd += ["--detection-model", detection_model]
+    if detection_score_threshold:
+        cmd += ["--detection-score-threshold", detection_score_threshold]
 
     print(f"Running Jasna: {' '.join(cmd)}", file=sys.stderr)
     t0 = time.time()
@@ -158,7 +168,13 @@ def cmd_demosaic(args):
         output = f"{base}_demosaic{ext}"
 
     print(f"Processing: {args.input} -> {output}", file=sys.stderr)
-    success = run_jasna(args.input, output, args.device)
+    success = run_jasna(
+        args.input,
+        output,
+        args.device,
+        detection_model=args.detection_model,
+        detection_score_threshold=args.detection_score_threshold,
+    )
     if success:
         print(f"Done: {output}", file=sys.stderr)
     else:
@@ -183,6 +199,13 @@ def main():
                         help="Output video file (default: {name}_demosaic.{ext})")
     p_demo.add_argument("--device", default="auto",
                         help="Device: auto or cuda:N (Jasna is GPU-only)")
+    p_demo.add_argument("--detection-model", default=None,
+                        help="Jasna --detection-model (e.g. rfdetr-v6, "
+                             "rfdetr-v6-large). Default: Jasna's own default "
+                             "(rfdetr-v6)")
+    p_demo.add_argument("--detection-score-threshold", default=None,
+                        help="Jasna --detection-score-threshold. Default: the "
+                             "selected model's recommended value")
 
     args = parser.parse_args()
 
