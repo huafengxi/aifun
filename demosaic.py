@@ -88,6 +88,8 @@ def run_jasna(
     device: str = "auto",
     detection_model: str | None = None,
     detection_score_threshold: str | None = None,
+    restoration_model_name: str | None = None,
+    restoration_model_path: str | None = None,
 ):
     """Run Jasna locally to demosaic a video.
 
@@ -117,6 +119,10 @@ def run_jasna(
         cmd += ["--detection-model", detection_model]
     if detection_score_threshold:
         cmd += ["--detection-score-threshold", detection_score_threshold]
+    if restoration_model_name:
+        cmd += ["--restoration-model-name", restoration_model_name]
+    if restoration_model_path:
+        cmd += ["--restoration-model-path", restoration_model_path]
 
     print(f"Running Jasna: {' '.join(cmd)}", file=sys.stderr)
     t0 = time.time()
@@ -174,6 +180,8 @@ def cmd_demosaic(args):
         args.device,
         detection_model=args.detection_model,
         detection_score_threshold=args.detection_score_threshold,
+        restoration_model_name=args.restoration_model_name,
+        restoration_model_path=args.restoration_model_path,
     )
     if success:
         print(f"Done: {output}", file=sys.stderr)
@@ -206,6 +214,14 @@ def main():
     p_demo.add_argument("--detection-score-threshold", default=None,
                         help="Jasna --detection-score-threshold. Default: the "
                              "selected model's recommended value")
+    p_demo.add_argument("--restoration-model-name", default=None,
+                        help="Jasna --restoration-model-name (only "
+                             "'basicvsrpp' supported for now). Default: "
+                             "Jasna's own default")
+    p_demo.add_argument("--restoration-model-path", default=None,
+                        help="Jasna --restoration-model-path. Default: "
+                             "model_weights/lada_mosaic_restoration_model_"
+                             "generic_v1.2.pth")
 
     args = parser.parse_args()
 
