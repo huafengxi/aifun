@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-funscript.py — Generate funscript from siko timestamps.
+funscript.py — Generate funscript from timing lines.
 
-Reads siko.py TSV output (stdin) and generates a funscript JSON file.
+Reads TSV timing lines (stdin) and generates a funscript JSON file.
+Input format: whitespace-separated lines `start_seconds duration_seconds`
+(blank lines and `#` comments ignored).
 
 Usage:
-    ./siko.py a.mp3 | ./funscript.py -o output.funscript
-    ./siko.py a.mp3 | ./funscript.py --freq 6.0 --range 80
+    generate-timings | ./funscript.py -o output.funscript
+    generate-timings | ./funscript.py --freq 6.0 --range 80
 """
 
 import argparse
@@ -16,7 +18,7 @@ import math
 
 
 def parse_tsv(lines):
-    """Parse siko.py TSV output: start_ts  duration"""
+    """Parse TSV timing lines: start_ts  duration"""
     timings = []
     for line in lines:
         line = line.strip()
@@ -42,7 +44,7 @@ def generate_funscript(
     attack=0.1,     # attack time (seconds)
     release=0.15,   # release time (seconds)
 ):
-    """Generate funscript actions from siko timings."""
+    """Generate funscript actions from timings."""
     actions = []
     action_id = 0
 
@@ -109,7 +111,7 @@ def generate_funscript(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate funscript from siko timestamps."
+        description="Generate funscript from timing lines."
     )
     parser.add_argument("-o", "--output", default="output.funscript",
                         help="Output funscript file (default: output.funscript)")
