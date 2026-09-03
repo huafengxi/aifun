@@ -1,4 +1,4 @@
-#!/home/yuanqi.xhf/miniconda3/bin/python
+#!/usr/bin/env python3
 """
 paint.py — Text-to-image generation with the local Krea 2 diffusers pipeline.
 

@@ -1,4 +1,4 @@
-#!/home/yuanqi.xhf/miniconda3/bin/python
+#!/usr/bin/env python3
 """
 expand.py — Plain-text prompt expansion for paint.py via qwen3-a.
 

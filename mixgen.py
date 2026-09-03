@@ -1,4 +1,4 @@
-#!/home/yuanqi.xhf/miniconda3/bin/python
+#!/usr/bin/env python3
 """
 mixgen.py — reference-image-conditioned generation (manual img2img) on the
 local Krea 2 diffusers pipeline.
