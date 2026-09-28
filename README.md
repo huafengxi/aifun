@@ -34,7 +34,7 @@ Key operational facts:
   Defaults (krea2 Turbo): 2048×2048, 8 steps, `--cfg 0.0`.
 - **SGLang backend (faster, supports 2048²)**: `make -C ~/m krea2.start` —
   SGLang-diffusion Docker, 2×GPU tp2 + online FP8, binds `127.0.0.1:8098`,
-  ready in ~60 s, desired=online nv1-only (`env/services.yml` hosts 限定，任务 0828-0002-yt5j；managed via `maas/maas.py`). Exposes the
+  ready in ~60 s, desired=online nv1-only (declared on nv1 only in the service registry, 任务 0828-0002-yt5j；managed via `maas/maas.py`). Exposes the
   OpenAI-compatible `POST /v1/images/generations` (`b64_json` → save with
   `imgsave.py`). 1024² ~4.7 s vs paint.py's ~13.5 s; 2048² (~21 s) fits
   only on SGLang (paint.py OOMs).
