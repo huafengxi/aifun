@@ -130,7 +130,7 @@ Stdlib + PIL only.
 
 ### funscript.py
 
-Converts timing lines read from **stdin** into funscript format for
+Converts timing lines read from stdin into funscript format for
 interactive toys. Input format: whitespace-separated lines
 `start_seconds duration_seconds` (blank lines and `#` comments ignored) —
 any tool that emits such TSV timings can be piped in.
@@ -155,7 +155,7 @@ generate-timings | ./funscript.py --freq 6.0 --range 80
 ### video-enhance.py
 
 Optimizes video quality with an ffmpeg filter pipeline — denoise (`hqdn3d`) →
-sharpen (`cas`) → optional lanczos upscale — and re-encodes to **H.265**.
+sharpen (`cas`) → optional lanczos upscale — and re-encodes to H.265.
 Uses `hevc_nvenc` (GPU) by default, falls back to `libx265` (CPU) automatically.
 
 ```bash
@@ -183,12 +183,12 @@ for compatibility.
 Performance notes (benchmarked 2026-08-22 on a 45 s 1080p wmv3 clip,
 RTX 5880 Ada, task 2026-08-22-20-08-07-koi3):
 
-- The bottleneck is the **CPU filter chain**, not decode/encode: the same
+- The bottleneck is the CPU filter chain, not decode/encode: the same
   pipeline with no filters runs ~265 fps (8.8x) vs ~66 fps (2.2x) with
   denoise+sharpen. `-hwaccel cuda` and `hevc_nvenc -preset p1`
   therefore buy almost nothing (p1 also adds ~22% file size).
 - `cas` sharpening costs ~1/3 of total runtime (2.2x → 3.4x, +52% when
-  dropped), so **sharpening is off by default** since 2026-08-22
+  dropped), so sharpening is off by default since 2026-08-22
   (task 2026-08-22-21-07-22-16e9); use `--sharpen 0.4` to restore it.
   hqdn3d denoise is kept.
 - VC-1/wmv3 cannot be hardware-decoded on Ada GPUs (`vc1_cuvid` fails with
