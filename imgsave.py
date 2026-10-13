@@ -69,8 +69,6 @@ def save_jpeg(img: Image.Image, out: str, quality: int) -> int:
         img = img.convert("RGB")  # RGBA/P 等无 alpha 通道支持的格式
     fmt = Image.registered_extensions().get(
         os.path.splitext(out)[1].lower(), "JPEG")
-    if fmt == "JPEG" and img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
     img.save(out, format=fmt, quality=quality)
     return os.path.getsize(out)
 

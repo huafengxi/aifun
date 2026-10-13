@@ -30,12 +30,12 @@ import subprocess
 import sys
 
 
-def run(cmd, capture=True):
+def run(cmd):
     """Run a command, return (rc, stdout, stderr)."""
     p = subprocess.run(
         cmd,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
     return p.returncode, p.stdout or "", p.stderr or ""
@@ -193,11 +193,8 @@ def main():
           f"{vs.get('codec_name', '?')}, {vs.get('r_frame_rate', '?')} fps{dur_s})")
 
     # Encoder selection
-    if args.encoder == "gpu":
-        encoder = "gpu"
-    elif args.encoder == "cpu":
-        encoder = "cpu"
-    else:
+    encoder = args.encoder
+    if encoder == "auto":
         encoder = "gpu" if nvenc_available() else "cpu"
     print(f"encode: {'hevc_nvenc (NVENC GPU)' if encoder == 'gpu' else 'libx265 (CPU)'} "
           f"cq={args.cq}")
